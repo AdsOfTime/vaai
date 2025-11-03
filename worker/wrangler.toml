@@ -1,0 +1,23 @@
+name = "vaai-backend-worker"
+main = "src/index.ts"
+compatibility_date = "2024-10-30"
+
+[vars]
+ENVIRONMENT = "production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vaai-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[kv_namespaces]]
+binding = "OAUTH_STATE"
+id = "00000000000000000000000000000000"
+
+# Secrets to configure via `wrangler secret put`
+# - GOOGLE_CLIENT_ID
+# - GOOGLE_CLIENT_SECRET
+# - GOOGLE_REDIRECT_URI
+# - FRONTEND_REDIRECT_URI
+# - JWT_SECRET
+# - OPENAI_API_KEY

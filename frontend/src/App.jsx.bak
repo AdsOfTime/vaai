@@ -1,0 +1,1931 @@
+import React, { useState, useEffect, useRef } from 'react';
+import axios from 'axios';
+import './App.css';
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [emails, setEmails] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [token, setToken] = useState(localStorage.getItem('vaai_token'));
+  const [calendarEvents, setCalendarEvents] = useState([]);
+  const [busySlots, setBusySlots] = useState([]);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [creatingEvent, setCreatingEvent] = useState(false);
+  const [autoSortLoading, setAutoSortLoading] = useState(false);
+  const [autoSortResults, setAutoSortResults] = useState([]);
+  const [briefing, setBriefing] = useState(null);
+  const [briefingLoading, setBriefingLoading] = useState(false);
+  const [briefingError, setBriefingError] = useState(null);
+  const [actionLoadingId, setActionLoadingId] = useState(null);
+  const [actionModal, setActionModal] = useState(null);
+  const [actionToast, setActionToast] = useState(null);
+  const [actionMetrics, setActionMetrics] = useState(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsError, setMetricsError] = useState(null);
+  const [feedbackLoadingId, setFeedbackLoadingId] = useState(null);
+  const [teams, setTeams] = useState([]);
+  const [activeTeamId, setActiveTeamId] = useState(null);
+  const [teamModal, setTeamModal] = useState(null);
+  const [teamForm, setTeamForm] = useState({
+    name: '',
+    inviteEmail: '',
+    inviteRole: 'member'
+  });
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamError, setTeamError] = useState(null);
+  const [acceptingInvite, setAcceptingInvite] = useState(false);
+  const [followUps, setFollowUps] = useState([]);
+  const [followUpLoading, setFollowUpLoading] = useState(false);
+  const [followUpError, setFollowUpError] = useState(null);
+  const [followUpModal, setFollowUpModal] = useState(null);
+  const [followUpActionId, setFollowUpActionId] = useState(null);
+  const toastTimeoutRef = useRef(null);
+  const [newEvent, setNewEvent] = useState({
+    summary: '',
+    start: '',
+    end: '',
+    attendees: '',
+    description: '',
+    location: '',
+    createMeetLink: false
+  });
+
+  useEffect(() => {
+    if (token) {
+      fetchUserInfo();
+    }
+  }, [token]);
+
+  const refreshBriefing = async () => {
+    if (!token) return;
+
+    setBriefingLoading(true);
+    setBriefingError(null);
+    try {
+      const response = await axios.get('/api/briefing', {
+        headers: getAuthHeaders()
+      });
+      setBriefing(response.data);
+    } catch (error) {
+      console.error('Failed to load briefing:', error);
+      setBriefingError('Unable to load daily briefing right now.');
+    } finally {
+      setBriefingLoading(false);
+    }
+  };
+
+  const showToast = (toast) => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+    setActionToast(toast);
+    if (!toast?.persistent) {
+      toastTimeoutRef.current = setTimeout(() => {
+        setActionToast(null);
+        toastTimeoutRef.current = null;
+      }, 5000);
+    }
+  };
+
+  const dismissToast = () => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+    setActionToast(null);
+  };
+
+  const updateBriefingItem = (emailId, updater) => {
+    setBriefing(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        items: prev.items.map(item => (
+          item.emailId === emailId ? updater(item) : item
+        ))
+      };
+    });
+  };
+
+  useEffect(() => () => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+  }, []);
+
+  const getAuthHeaders = () => {
+    const headers = {
+      Authorization: `Bearer ${token}`
+    };
+    if (activeTeamId) {
+      headers['X-Team-Id'] = activeTeamId;
+    }
+    return headers;
+  };
+
+  const syncTeamsState = (fetchedTeams) => {
+    setTeams(fetchedTeams);
+    if (fetchedTeams.length > 0) {
+      setActiveTeamId(prev => {
+        if (!prev) return fetchedTeams[0].id;
+        return fetchedTeams.some(team => team.id === prev) ? prev : fetchedTeams[0].id;
+      });
+    } else {
+      setActiveTeamId(null);
+    }
+  };
+
+  const fetchTeams = async () => {
+    if (!token) {
+      return;
+    }
+
+    setTeamLoading(true);
+    setTeamError(null);
+    try {
+      const response = await axios.get('/api/teams', {
+        headers: getAuthHeaders()
+      });
+      const fetchedTeams = Array.isArray(response.data.teams) ? response.data.teams : [];
+      syncTeamsState(fetchedTeams);
+    } catch (error) {
+      console.error('Failed to load teams:', error);
+      setTeamError('Unable to load teams right now.');
+    } finally {
+      setTeamLoading(false);
+    }
+  };
+
+  const handleTeamModalOpen = (type) => {
+    setTeamError(null);
+    if (type === 'create') {
+      setTeamForm({
+        name: '',
+        inviteEmail: '',
+        inviteRole: 'member'
+      });
+    } else if (type === 'invite') {
+      setTeamForm(prev => ({
+        ...prev,
+        inviteEmail: '',
+        inviteRole: 'member'
+      }));
+    }
+    setTeamModal({ type });
+  };
+
+  const handleTeamModalClose = () => {
+    setTeamModal(null);
+    setTeamError(null);
+    setTeamLoading(false);
+  };
+
+  const handleTeamFormChange = (field, value) => {
+    setTeamForm(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const handleCreateTeam = async (event) => {
+    event?.preventDefault();
+    if (!token) return;
+
+    const trimmedName = teamForm.name.trim();
+    if (!trimmedName) {
+      setTeamError('Team name is required.');
+      return;
+    }
+
+    setTeamLoading(true);
+    setTeamError(null);
+
+    try {
+      await axios.post(
+        '/api/teams',
+        { name: trimmedName },
+        { headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } }
+      );
+
+      showToast({ message: `Team "${trimmedName}" created.` });
+      await fetchTeams();
+      handleTeamModalClose();
+    } catch (error) {
+      console.error('Failed to create team:', error);
+      setTeamError(error.response?.data?.error || 'Unable to create team.');
+    } finally {
+      setTeamLoading(false);
+    }
+  };
+
+  const handleInviteMember = async (event) => {
+    event?.preventDefault();
+    if (!token) return;
+
+    if (!activeTeamId) {
+      setTeamError('Select a team before inviting members.');
+      return;
+    }
+
+    const trimmedEmail = teamForm.inviteEmail.trim();
+    if (!trimmedEmail) {
+      setTeamError('Email is required.');
+      return;
+    }
+
+    setTeamLoading(true);
+    setTeamError(null);
+
+    try {
+      await axios.post(
+        `/api/teams/${activeTeamId}/invite`,
+        { email: trimmedEmail, role: teamForm.inviteRole },
+        { headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } }
+      );
+
+      showToast({ message: `Invitation sent to ${trimmedEmail}.` });
+      handleTeamModalClose();
+    } catch (error) {
+      console.error('Failed to send invitation:', error);
+      setTeamError(error.response?.data?.error || 'Unable to send invitation.');
+    } finally {
+      setTeamLoading(false);
+    }
+  };
+
+  const acceptTeamInvitation = async (tokenValue) => {
+    if (!token || !tokenValue) return;
+
+    setAcceptingInvite(true);
+    try {
+      await axios.post(
+        '/api/teams/invitations/accept',
+        { token: tokenValue },
+        { headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } }
+      );
+      showToast({ message: 'Invitation accepted. Welcome to the team!' });
+      await fetchTeams();
+    } catch (error) {
+      console.error('Failed to accept team invitation:', error);
+      showToast({
+        message: error.response?.data?.error || 'Unable to accept invitation.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setAcceptingInvite(false);
+    }
+  };
+
+  const handleTeamSelect = (event) => {
+    const value = event.target.value ? Number(event.target.value) : null;
+    setActiveTeamId(value);
+  };
+
+  const fetchFollowUps = async () => {
+    if (!token || !activeTeamId) {
+      setFollowUps([]);
+      return;
+    }
+
+    setFollowUpLoading(true);
+    setFollowUpError(null);
+    try {
+      const response = await axios.get('/api/follow-ups', {
+        headers: getAuthHeaders()
+      });
+      setFollowUps(Array.isArray(response.data.tasks) ? response.data.tasks : []);
+    } catch (error) {
+      console.error('Failed to load follow-ups:', error);
+      setFollowUpError(error.response?.data?.error || 'Unable to load follow-up queue right now.');
+    } finally {
+      setFollowUpLoading(false);
+    }
+  };
+
+  const openFollowUpModal = (task) => {
+    setFollowUpModal({
+      task,
+      subject: task.draftSubject || task.subject || '',
+      body: task.draftBody || '',
+      sendAt: formatDateTimeLocal(task.suggestedSendAt ? new Date(task.suggestedSendAt) : new Date(Date.now() + 15 * 60 * 1000))
+    });
+  };
+
+  const closeFollowUpModal = () => {
+    setFollowUpModal(null);
+    setFollowUpActionId(null);
+  };
+
+  const submitFollowUpApproval = async (event) => {
+    event?.preventDefault();
+    if (!followUpModal) return;
+
+    const { task, subject, body, sendAt } = followUpModal;
+    const payload = {
+      draftSubject: subject,
+      draftBody: body,
+      sendAt: sendAt ? new Date(sendAt).toISOString() : new Date().toISOString()
+    };
+
+    setFollowUpActionId(task.id);
+    try {
+      await axios.post(`/api/follow-ups/${task.id}/approve`, payload, {
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json'
+        }
+      });
+      showToast({ message: 'Follow-up scheduled.' });
+      closeFollowUpModal();
+      fetchFollowUps();
+    } catch (error) {
+      console.error('Failed to approve follow-up:', error);
+      showToast({
+        message: error.response?.data?.error || 'Unable to approve follow-up.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setFollowUpActionId(null);
+    }
+  };
+
+  const handleFollowUpSnooze = async (task, minutes) => {
+    setFollowUpActionId(task.id);
+    try {
+      await axios.post(`/api/follow-ups/${task.id}/snooze`, { minutes }, {
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json'
+        }
+      });
+      showToast({ message: `Snoozed for ${minutes} minutes.` });
+      fetchFollowUps();
+    } catch (error) {
+      console.error('Failed to snooze follow-up:', error);
+      showToast({
+        message: error.response?.data?.error || 'Unable to snooze follow-up.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setFollowUpActionId(null);
+    }
+  };
+
+  const handleFollowUpDismiss = async (task) => {
+    setFollowUpActionId(task.id);
+    try {
+      await axios.post(`/api/follow-ups/${task.id}/dismiss`, {}, {
+        headers: getAuthHeaders()
+      });
+      showToast({ message: 'Follow-up dismissed.' });
+      fetchFollowUps();
+    } catch (error) {
+      console.error('Failed to dismiss follow-up:', error);
+      showToast({
+        message: error.response?.data?.error || 'Unable to dismiss follow-up.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setFollowUpActionId(null);
+    }
+  };
+
+  const handleFollowUpRegenerate = async (task) => {
+    setFollowUpActionId(task.id);
+    try {
+      const response = await axios.post(`/api/follow-ups/${task.id}/regenerate`, {}, {
+        headers: getAuthHeaders()
+      });
+      if (response.data?.task) {
+        setFollowUps(prev =>
+          prev.map(item => (item.id === task.id ? response.data.task : item))
+        );
+      }
+      showToast({ message: 'Draft refreshed.' });
+    } catch (error) {
+      console.error('Failed to regenerate draft:', error);
+      showToast({
+        message: error.response?.data?.error || 'Unable to regenerate draft.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setFollowUpActionId(null);
+    }
+  };
+
+  const fetchActionMetrics = async (days = 7) => {
+    if (!token) {
+      return;
+    }
+
+    setMetricsLoading(true);
+    setMetricsError(null);
+
+    try {
+      const response = await axios.get('/api/actions/metrics', {
+        headers: getAuthHeaders(),
+        params: { days }
+      });
+      setActionMetrics(response.data);
+    } catch (error) {
+      console.error('Failed to load assistant metrics:', error);
+      setMetricsError('Unable to load assistant metrics right now.');
+    } finally {
+      setMetricsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!token || !activeTeamId) {
+      setActionMetrics(null);
+      return;
+    }
+    fetchActionMetrics();
+  }, [token, activeTeamId]);
+
+  useEffect(() => {
+    if (token && activeTeamId) {
+      fetchFollowUps();
+    } else {
+      setFollowUps([]);
+    }
+  }, [token, activeTeamId]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const inviteToken = params.get('invite');
+    if (inviteToken) {
+      acceptTeamInvitation(inviteToken);
+      params.delete('invite');
+      const newQuery = params.toString();
+      const newUrl = `${window.location.pathname}${newQuery ? `?${newQuery}` : ''}`;
+      window.history.replaceState({}, '', newUrl);
+    }
+  }, [token]);
+
+  const handleBriefingAction = async (item, action) => {
+    if (!token) return;
+
+    const payload = {
+      emailId: item.emailId,
+      threadId: item.threadId,
+      ...(action.payload || {})
+    };
+
+    const loadingKey = `${item.emailId}:${action.type}`;
+    setActionLoadingId(loadingKey);
+
+    try {
+      if (action.type === 'draft_reply') {
+        const response = await axios.post('/api/actions/draft-reply', payload, {
+          headers: getAuthHeaders()
+        });
+
+        const { actionId, draft } = response.data;
+        updateBriefingItem(item.emailId, existing => {
+          const previous = existing.lastAction || {};
+          return {
+            ...existing,
+            lastAction: {
+              ...previous,
+              actionId,
+              actionType: action.type,
+              status: 'completed',
+              timestamp: new Date().toISOString()
+            }
+          };
+        });
+
+        setActionModal({
+          type: 'draft_reply',
+          actionId,
+          draft,
+          email: item
+        });
+
+        showToast({
+          message: 'Reply drafted. Review before sending.',
+          actionId,
+          emailId: item.emailId,
+          actionType: action.type,
+          undoAvailable: true
+        });
+
+        fetchActionMetrics();
+      } else if (action.type === 'schedule_meeting') {
+        const response = await axios.post('/api/actions/schedule-meeting', payload, {
+          headers: getAuthHeaders()
+        });
+
+        const { actionId, suggestions } = response.data;
+        updateBriefingItem(item.emailId, existing => {
+          const previous = existing.lastAction || {};
+          return {
+            ...existing,
+            lastAction: {
+              ...previous,
+              actionId,
+              actionType: action.type,
+              status: 'awaiting_confirmation',
+              timestamp: new Date().toISOString()
+            }
+          };
+        });
+
+        setActionModal({
+          type: 'schedule_meeting',
+          actionId,
+          suggestions,
+          email: item
+        });
+
+        showToast({
+          message: suggestions.length
+            ? 'Meeting times suggested.'
+            : 'No open times were available.',
+          actionId: suggestions.length ? actionId : undefined,
+          emailId: item.emailId,
+          actionType: action.type,
+          undoAvailable: suggestions.length > 0,
+          persistent: !suggestions.length
+        });
+
+        fetchActionMetrics();
+      } else if (action.type === 'mark_handled') {
+        const response = await axios.post('/api/actions/mark-handled', payload, {
+          headers: getAuthHeaders()
+        });
+
+        const { actionId } = response.data;
+        updateBriefingItem(item.emailId, existing => {
+          const previous = existing.lastAction || {};
+          return {
+            ...existing,
+            lastAction: {
+              ...previous,
+              actionId,
+              actionType: action.type,
+              status: 'completed',
+              timestamp: new Date().toISOString()
+            },
+            handled: true
+          };
+        });
+
+        showToast({
+          message: 'Email marked as handled.',
+          actionId,
+          emailId: item.emailId,
+          actionType: action.type,
+          undoAvailable: true
+        });
+
+        fetchActionMetrics();
+      } else {
+        showToast({
+          message: `Action "${action.type}" is not supported yet.`,
+          error: true,
+          persistent: true
+        });
+      }
+    } catch (error) {
+      console.error('Briefing action failed:', error);
+      showToast({
+        message: 'Failed to perform action. Check console for details.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleUndoAction = async (toastInfo) => {
+    if (!toastInfo?.actionId) {
+      dismissToast();
+      return;
+    }
+
+    try {
+      await axios.post(`/api/actions/${toastInfo.actionId}/undo`, {}, {
+        headers: getAuthHeaders()
+      });
+
+      if (toastInfo.emailId) {
+        updateBriefingItem(toastInfo.emailId, existing => ({
+          ...existing,
+          lastAction: existing.lastAction
+            ? { ...existing.lastAction, status: 'undone', undoneAt: new Date().toISOString() }
+            : existing.lastAction,
+          handled: toastInfo.actionType === 'mark_handled' ? false : existing.handled
+        }));
+      }
+
+      showToast({
+        message: 'Action undone.',
+        persistent: false
+      });
+
+      fetchActionMetrics();
+    } catch (error) {
+      console.error('Undo action failed:', error);
+      showToast({
+        message: 'Unable to undo action.',
+        error: true,
+        persistent: true
+      });
+    }
+  };
+
+  const handleActionFeedback = async ({ actionId, emailId, rating, note }) => {
+    if (!token || !actionId || !rating) {
+      return;
+    }
+
+    setFeedbackLoadingId(actionId);
+
+    try {
+      await axios.post(`/api/actions/${actionId}/feedback`, {
+        rating,
+        note
+      }, {
+        headers: getAuthHeaders()
+      });
+
+      if (emailId) {
+        updateBriefingItem(emailId, existing => ({
+          ...existing,
+          lastAction: existing.lastAction
+            ? {
+                ...existing.lastAction,
+                feedback: {
+                  rating,
+                  note: note || null
+                }
+              }
+            : existing.lastAction
+        }));
+      }
+
+      showToast({
+        message: rating === 'helpful' ? 'Marked as helpful. Thanks!' : 'Feedback saved. Thank you!',
+        persistent: false
+      });
+
+      fetchActionMetrics();
+    } catch (error) {
+      console.error('Action feedback failed:', error);
+      showToast({
+        message: 'Unable to record feedback right now.',
+        error: true,
+        persistent: true
+      });
+    } finally {
+      setFeedbackLoadingId(null);
+    }
+  };
+
+  const closeActionModal = () => {
+    setActionModal(null);
+  };
+
+  const copyToClipboard = async (value) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast({
+        message: 'Copied to clipboard.'
+      });
+    } catch (error) {
+      console.error('Copy failed:', error);
+      showToast({
+        message: 'Unable to copy to clipboard.',
+        error: true,
+        persistent: true
+      });
+    }
+  };
+
+  const formatDateTimeLocal = (date) => {
+    const pad = (value) => value.toString().padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+
+  useEffect(() => {
+    if (user) {
+      const defaultStart = new Date();
+      defaultStart.setHours(defaultStart.getHours() + 1, 0, 0, 0);
+      const defaultEnd = new Date(defaultStart.getTime() + 30 * 60 * 1000);
+      
+      setNewEvent(prev => ({
+        ...prev,
+        start: formatDateTimeLocal(defaultStart),
+        end: formatDateTimeLocal(defaultEnd)
+      }));
+
+      refreshBriefing();
+    }
+  }, [user]);
+
+  const fetchUserInfo = async () => {
+    try {
+      const response = await axios.get('/auth/me', {
+        headers: getAuthHeaders()
+      });
+      setUser(response.data.user);
+      const fetchedTeams = Array.isArray(response.data.teams) ? response.data.teams : [];
+      syncTeamsState(fetchedTeams);
+    } catch (error) {
+      console.error('Failed to fetch user info:', error);
+      localStorage.removeItem('vaai_token');
+      setToken(null);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      const response = await axios.get('/auth/google');
+      window.location.href = response.data.authUrl;
+    } catch (error) {
+      console.error('Login failed:', error);
+    }
+  };
+
+  const fetchEmails = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.get('/api/emails', {
+        headers: getAuthHeaders()
+      });
+      setEmails(response.data.emails);
+    } catch (error) {
+      console.error('Failed to fetch emails:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const classifyEmails = async () => {
+    if (emails.length === 0) return;
+    
+    setLoading(true);
+    try {
+      const emailIds = emails.map(email => email.id);
+      const response = await axios.post('/api/emails/classify', 
+        { emailIds },
+        { headers: getAuthHeaders() }
+      );
+      
+      console.log('Classification results:', response.data.results);
+      alert('Emails classified! Check console for results.');
+    } catch (error) {
+      console.error('Failed to classify emails:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const autoSortInbox = async () => {
+    setAutoSortLoading(true);
+    try {
+      const response = await axios.post('/api/emails/auto-sort', {
+        limit: 10
+      }, {
+        headers: getAuthHeaders()
+      });
+
+      setAutoSortResults(response.data.results || []);
+      if (!emails.length) {
+        fetchEmails();
+      }
+    } catch (error) {
+      console.error('Failed to auto-sort emails:', error);
+      alert('Auto-sort failed. Check console for details.');
+    } finally {
+      setAutoSortLoading(false);
+    }
+  };
+
+  const fetchCalendarEvents = async () => {
+    setCalendarLoading(true);
+    try {
+      const response = await axios.get('/api/calendar/events', {
+        headers: getAuthHeaders()
+      });
+      setCalendarEvents(response.data.events || []);
+    } catch (error) {
+      console.error('Failed to fetch calendar events:', error);
+    } finally {
+      setCalendarLoading(false);
+    }
+  };
+
+  const fetchAvailability = async () => {
+    setCalendarLoading(true);
+    try {
+      const response = await axios.get('/api/calendar/availability', {
+        headers: getAuthHeaders()
+      });
+      setBusySlots(response.data.busy || []);
+    } catch (error) {
+      console.error('Failed to fetch availability:', error);
+    } finally {
+      setCalendarLoading(false);
+    }
+  };
+
+  const handleNewEventChange = (field, value) => {
+    setNewEvent(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const formatEventTime = (time) => {
+    if (!time) return 'No time set';
+    const value = time.dateTime || time.date;
+    if (!value) return 'No time set';
+    return new Date(value).toLocaleString();
+  };
+
+  const formatBusyWindow = (slot) => {
+    if (!slot?.start || !slot?.end) return 'Unavailable';
+    const startLabel = new Date(slot.start).toLocaleString();
+    const endLabel = new Date(slot.end).toLocaleString();
+    return `${startLabel} -> ${endLabel}`;
+  };
+
+  const formatRelativeTime = (iso) => {
+    if (!iso) return 'No reminder set';
+    const target = new Date(iso).getTime();
+    if (Number.isNaN(target)) return 'No reminder set';
+    const diffMs = target - Date.now();
+    const diffMinutes = Math.round(Math.abs(diffMs) / 60000);
+    if (diffMinutes < 1) return diffMs <= 0 ? 'Due now' : 'Less than a minute';
+    if (diffMinutes < 60) {
+      return diffMs <= 0 ? `${diffMinutes} min overdue` : `in ${diffMinutes} min`;
+    }
+    const diffHours = Math.round(diffMinutes / 60);
+    if (diffHours < 24) {
+      return diffMs <= 0 ? `${diffHours} hr overdue` : `in ${diffHours} hr`;
+    }
+    const diffDays = Math.round(diffHours / 24);
+    return diffMs <= 0 ? `${diffDays} day${diffDays > 1 ? 's' : ''} overdue` : `in ${diffDays} day${diffDays > 1 ? 's' : ''}`;
+  };
+
+  const scheduleEvent = async (event) => {
+    event.preventDefault();
+
+    if (!newEvent.summary || !newEvent.start || !newEvent.end) {
+      alert('Please provide event summary, start, and end time.');
+      return;
+    }
+
+    const startDate = new Date(newEvent.start);
+    const endDate = new Date(newEvent.end);
+
+    if (endDate <= startDate) {
+      alert('End time must be after start time.');
+      return;
+    }
+
+    setCreatingEvent(true);
+    try {
+      const attendees = newEvent.attendees
+        .split(',')
+        .map(email => email.trim())
+        .filter(Boolean);
+
+      await axios.post('/api/calendar/events', {
+        summary: newEvent.summary,
+        description: newEvent.description,
+        start: startDate.toISOString(),
+        end: endDate.toISOString(),
+        attendees,
+        location: newEvent.location,
+        createMeetLink: newEvent.createMeetLink
+      }, {
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json'
+        }
+      });
+
+      alert('Event scheduled successfully!');
+      fetchCalendarEvents();
+
+      const nextStart = new Date(endDate.getTime() + 30 * 60 * 1000);
+      const nextEnd = new Date(nextStart.getTime() + 30 * 60 * 1000);
+
+      setNewEvent(prev => ({
+        ...prev,
+        summary: '',
+        description: '',
+        location: '',
+        attendees: '',
+        createMeetLink: false,
+        start: formatDateTimeLocal(nextStart),
+        end: formatDateTimeLocal(nextEnd)
+      }));
+    } catch (error) {
+      console.error('Failed to schedule event:', error);
+      alert('Failed to schedule event. Check console for details.');
+    } finally {
+      setCreatingEvent(false);
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem('vaai_token');
+    setToken(null);
+    setUser(null);
+    setEmails([]);
+    setTeams([]);
+    setActiveTeamId(null);
+    setCalendarEvents([]);
+    setBusySlots([]);
+    setAutoSortResults([]);
+    setFollowUps([]);
+    setFollowUpError(null);
+    setFollowUpModal(null);
+    setBriefing(null);
+    setBriefingError(null);
+    setBriefingLoading(false);
+    setActionLoadingId(null);
+    setActionModal(null);
+    dismissToast();
+    setNewEvent({
+      summary: '',
+      start: '',
+      end: '',
+      attendees: '',
+      description: '',
+      location: '',
+      createMeetLink: false
+    });
+  };
+
+  // Handle OAuth callback
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    
+    if (code && !token) {
+      handleOAuthCallback(code);
+    }
+  }, []);
+
+  const handleOAuthCallback = async (code) => {
+    try {
+      const response = await axios.post('/auth/google/callback', { code });
+      const { token: newToken, user: userData } = response.data;
+      
+      localStorage.setItem('vaai_token', newToken);
+      setToken(newToken);
+      setUser(userData);
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, '/');
+    } catch (error) {
+      console.error('OAuth callback failed:', error);
+    }
+  };
+
+  if (!user) {
+    return (
+      <div className="login-container">
+        <div className="login-card">
+          <h1>VAAI</h1>
+          <p>Virtual Assistant AI for Email Management</p>
+          <button onClick={handleGoogleLogin} className="google-login-btn">
+            Sign in with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      <header className="header">
+        <div className="header-left">
+          <h1>VAAI Dashboard</h1>
+          <div className="team-controls">
+            {teams.length > 0 ? (
+              <>
+                <label htmlFor="team-select" className="team-label">
+                  Team
+                </label>
+                <select
+                  id="team-select"
+                  className="team-select"
+                  value={activeTeamId ?? ''}
+                  onChange={handleTeamSelect}
+                  disabled={teamLoading}
+                >
+                  {teams.map(team => (
+                    <option key={team.id} value={team.id}>
+                      {team.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => handleTeamModalOpen('invite')}
+                  disabled={!activeTeamId || teamLoading}
+                >
+                  Invite
+                </button>
+              </>
+            ) : (
+              <span className="team-empty">Create a team to collaborate with others.</span>
+            )}
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => handleTeamModalOpen('create')}
+              disabled={teamLoading}
+            >
+              {teams.length ? 'New Team' : 'Create Team'}
+            </button>
+          </div>
+          {teamError && <div className="team-error">{teamError}</div>}
+          {acceptingInvite && <div className="team-info">Accepting team invitation...</div>}
+        </div>
+        <div className="user-info">
+          {user.picture && <img src={user.picture} alt={user.name} className="user-avatar" />}
+          <span>{user.name}</span>
+          <button onClick={logout} className="logout-btn">Logout</button>
+        </div>
+      </header>
+
+      <main className="main">
+        <div className="briefing-container">
+          <div className="briefing-header">
+            <div>
+              <h2>Daily Briefing</h2>
+              {briefing?.generatedAt && (
+                <span className="briefing-meta">
+                  Generated {new Date(briefing.generatedAt).toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={refreshBriefing}
+              className="btn btn-accent"
+              disabled={briefingLoading}
+            >
+              {briefingLoading ? 'Refreshing...' : 'Refresh Briefing'}
+            </button>
+          </div>
+          {briefingError && <div className="briefing-error">{briefingError}</div>}
+          {!briefing && !briefingError && !briefingLoading && (
+            <p className="briefing-placeholder">
+              Connect your Google account to generate a personalized summary.
+            </p>
+          )}
+          {briefingLoading && (
+            <p className="briefing-placeholder">Building your daily briefing...</p>
+          )}
+
+          {briefing && (
+            <>
+              <div className="briefing-summary">
+                {(briefing.summary || '')
+                  .split('\n')
+                  .filter(Boolean)
+                  .map((line, idx) => (
+                    <div key={idx} className="briefing-summary-line">
+                      {line.startsWith('-') ? line : `- ${line}`}
+                    </div>
+                  ))}
+              </div>
+              <div className="briefing-items">
+                {(briefing.items || []).slice(0, 5).map(item => (
+                  <div key={item.emailId} className="briefing-item">
+                    <div className="briefing-item-header">
+                      <strong>{item.subject || 'No subject'}</strong>
+                      <span>{item.from}</span>
+                    </div>
+                    <div className="briefing-tags">
+                      <span className="briefing-intent">{item.intent}</span>
+                      <span className="briefing-time">
+                        {new Date(item.receivedAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="briefing-action">{item.suggestedAction}</div>
+                    <div className="briefing-snippet">{item.snippet}</div>
+                    {item.actions?.length > 0 && (
+                      <div className="briefing-actions">
+                        {item.actions.map(action => {
+                          const key = `${item.emailId}:${action.type}`;
+                          const isHandled = action.type === 'mark_handled' && item.handled;
+                          const isDisabled = actionLoadingId === key || isHandled;
+                          const label = action.type === 'mark_handled' && item.handled
+                            ? 'Handled'
+                            : action.label;
+                          return (
+                            <button
+                              key={key}
+                              className="briefing-action-btn"
+                              disabled={isDisabled}
+                              onClick={() => !isDisabled && handleBriefingAction(item, action)}
+                            >
+                              {actionLoadingId === key ? 'Working...' : label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {item.lastAction && (
+                      <div className={`briefing-last-action ${item.lastAction.status}`}>
+                        Last action: {item.lastAction.actionType?.replace('_', ' ')} - {item.lastAction.status}
+                        {item.lastAction.status === 'undone' && item.lastAction.undoneAt && (
+                          <span className="briefing-last-action-time">
+                            {' '}at {new Date(item.lastAction.undoneAt).toLocaleTimeString()}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {item.lastAction &&
+                      item.lastAction.actionId &&
+                      item.lastAction.status !== 'undone' && (
+                        <div className="briefing-feedback">
+                          <span className="briefing-feedback-label">Was this helpful?</span>
+                          <div className="briefing-feedback-actions">
+                            {[
+                              { rating: 'helpful', label: 'Helpful' },
+                              { rating: 'not_helpful', label: 'Needs work' },
+                              { rating: 'needs_follow_up', label: 'Follow up' }
+                            ].map(option => {
+                              const isSelected = item.lastAction.feedback?.rating === option.rating;
+                              const isSaving = feedbackLoadingId === item.lastAction.actionId;
+                              return (
+                                <button
+                                  key={option.rating}
+                                  type="button"
+                                  className={`briefing-feedback-btn ${isSelected ? 'selected' : ''}`}
+                                  disabled={isSaving}
+                                  onClick={() =>
+                                    handleActionFeedback({
+                                      actionId: item.lastAction.actionId,
+                                      emailId: item.emailId,
+                                      rating: option.rating
+                                    })
+                                  }
+                                >
+                                  {isSaving ? 'Saving...' : option.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                  </div>
+                ))}
+                {briefing.items && briefing.items.length > 5 && (
+                  <div className="briefing-more">
+                    +{briefing.items.length - 5} more emails summarized in your inbox.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="followup-container">
+          <div className="followup-header">
+            <div>
+              <h2>Follow-Up Queue</h2>
+              {followUps.length > 0 && (
+                <span className="followup-subtitle">
+                  {followUps.length} pending reminder{followUps.length === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={fetchFollowUps}
+              disabled={followUpLoading || !activeTeamId}
+            >
+              {followUpLoading ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
+
+          {!activeTeamId && (
+            <p className="followup-placeholder">Select a team to view follow-up suggestions.</p>
+          )}
+
+          {activeTeamId && (
+            <>
+              {followUpError && <div className="followup-error">{followUpError}</div>}
+              {!followUpError && (
+                <>
+                  {followUpLoading && (
+                    <p className="followup-placeholder">Scanning your inbox for follow-ups...</p>
+                  )}
+                  {!followUpLoading && followUps.length === 0 && (
+                    <p className="followup-placeholder">No pending follow-ups. Great job keeping up!</p>
+                  )}
+                  {!followUpLoading && followUps.length > 0 && (
+                    <div className="followup-list">
+                      {followUps.map(task => (
+                        <div key={task.id} className="followup-item">
+                          <div className="followup-main">
+                            <div className="followup-title">
+                              {task.subject || 'No subject'}
+                            </div>
+                            <div className="followup-meta">
+                              <span>{task.counterpartEmail || 'Unknown contact'}</span>
+                              <span>Due {formatRelativeTime(task.dueAt || task.suggestedSendAt)}</span>
+                              {task.metadata?.idleDays != null && (
+                                <span>Idle {task.metadata.idleDays}d</span>
+                              )}
+                            </div>
+                            <p className="followup-summary">
+                              {task.summary || 'No summary available.'}
+                            </p>
+                          </div>
+                          <div className="followup-actions">
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={() => openFollowUpModal(task)}
+                              disabled={followUpActionId === task.id}
+                            >
+                              Review & Send
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => handleFollowUpSnooze(task, 60 * 24)}
+                              disabled={followUpActionId === task.id}
+                            >
+                              Snooze 1 day
+                            </button>
+                            <button
+                              type="button"
+                              className="link-button"
+                              onClick={() => handleFollowUpRegenerate(task)}
+                              disabled={followUpActionId === task.id}
+                            >
+                              Regenerate
+                            </button>
+                            <button
+                              type="button"
+                              className="link-button danger"
+                              onClick={() => handleFollowUpDismiss(task)}
+                              disabled={followUpActionId === task.id}
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        {token && (
+          <div className="metrics-card">
+            <div className="metrics-header">
+              <div>
+                <h3>Assistant Metrics</h3>
+                {actionMetrics?.timeframeDays ? (
+                  <span className="metrics-subtitle">
+                    Last {actionMetrics.timeframeDays} day{actionMetrics.timeframeDays > 1 ? 's' : ''}
+                  </span>
+                ) : (
+                  <span className="metrics-subtitle">All recorded actions</span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => fetchActionMetrics()}
+                disabled={metricsLoading}
+              >
+                {metricsLoading ? 'Refreshing...' : 'Refresh'}
+              </button>
+            </div>
+
+            {metricsError && <p className="metrics-error">{metricsError}</p>}
+
+            {!metricsError && (
+              <>
+                {metricsLoading && !actionMetrics && (
+                  <p className="metrics-placeholder">Loading assistant insights...</p>
+                )}
+
+                {!metricsLoading && !actionMetrics && (
+                  <p className="metrics-placeholder">
+                    No assistant activity recorded yet. Trigger an action to see impact.
+                  </p>
+                )}
+
+                {actionMetrics && (
+                  <div className="metrics-body">
+                    <div className="metrics-summary">
+                      <div className="metrics-stat">
+                        <span>Total actions</span>
+                        <strong>{actionMetrics.totals?.total ?? 0}</strong>
+                      </div>
+                      <div className="metrics-stat">
+                        <span>Completed</span>
+                        <strong>{actionMetrics.totals?.completed ?? 0}</strong>
+                      </div>
+                      <div className="metrics-stat">
+                        <span>Undone</span>
+                        <strong>{actionMetrics.totals?.undone ?? 0}</strong>
+                      </div>
+                      <div className="metrics-stat">
+                        <span>Marked helpful</span>
+                        <strong>{actionMetrics.feedback?.helpful ?? 0}</strong>
+                      </div>
+                    </div>
+
+                    {actionMetrics.byType?.length > 0 && (
+                      <div className="metrics-section">
+                        <h4>By action type</h4>
+                        <ul className="metrics-breakdown">
+                          {actionMetrics.byType.map(item => (
+                            <li key={item.actionType} className="metrics-breakdown-item">
+                              <div>
+                                <span className="metrics-breakdown-label">
+                                  {item.actionType.replace(/_/g, ' ')}
+                                </span>
+                                <span className="metrics-breakdown-sub">
+                                  {item.completed}/{item.total} completed
+                                </span>
+                              </div>
+                              <div className="metrics-breakdown-feedback">
+                                <span className="metrics-chip positive">H: {item.helpful}</span>
+                                <span className="metrics-chip neutral">U: {item.undone}</span>
+                                <span className="metrics-chip warning">N: {item.notHelpful}</span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {actionMetrics.recent?.length > 0 && (
+                      <div className="metrics-section">
+                        <h4>Recent assistant actions</h4>
+                        <ul className="metrics-recent">
+                          {actionMetrics.recent.map(entry => (
+                            <li key={entry.id} className="metrics-recent-item">
+                              <div>
+                                <span className="metrics-recent-title">
+                                  {entry.actionType.replace(/_/g, ' ')}
+                                </span>
+                                <span className="metrics-recent-meta">
+                                  {new Date(entry.createdAt).toLocaleString()}
+                                </span>
+                              </div>
+                              <div className={`metrics-badge ${entry.status}`}>
+                                {entry.status.replace(/_/g, ' ')}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="controls">
+          <button 
+            onClick={fetchEmails} 
+            disabled={loading}
+            className="btn btn-primary"
+          >
+            {loading ? 'Loading...' : 'Fetch Emails'}
+          </button>
+          
+          {emails.length > 0 && (
+            <button 
+              onClick={classifyEmails} 
+              disabled={loading}
+              className="btn btn-secondary"
+            >
+              {loading ? 'Classifying...' : 'Classify Emails'}
+            </button>
+          )}
+          <button
+            onClick={autoSortInbox}
+            disabled={autoSortLoading}
+            className="btn btn-accent"
+          >
+            {autoSortLoading ? 'Sorting...' : 'Auto-Sort Inbox'}
+          </button>
+        </div>
+
+        <div className="emails-container">
+          <h2>Recent Emails ({emails.length})</h2>
+          {emails.length === 0 ? (
+            <p>No emails loaded. Click "Fetch Emails" to get started.</p>
+          ) : (
+            <div className="emails-list">
+              {emails.map(email => (
+                <div key={email.id} className="email-item">
+                  <div className="email-header">
+                    <strong>{email.subject}</strong>
+                    <span className="email-date">
+                      {new Date(email.date).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <div className="email-from">{email.from}</div>
+                  <div className="email-snippet">{email.snippet}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {autoSortResults.length > 0 && (
+          <div className="autosort-container">
+            <h2>Auto-sort Results</h2>
+            <div className="autosort-list">
+              {autoSortResults.map(result => (
+                <div key={result.emailId} className="autosort-item">
+                  <div className="autosort-header">
+                    <strong>{result.subject || 'No subject'}</strong>
+                    <span>{result.from}</span>
+                  </div>
+                  {result.error ? (
+                    <div className="autosort-error">Failed: {result.error}</div>
+                  ) : (
+                    <>
+                      <div className="autosort-meta">
+                        <span className="autosort-badge">
+                          {result.category?.name || 'Uncategorized'}
+                        </span>
+                        <span className="autosort-source">
+                          {result.decision?.source === 'rule'
+                            ? `Rule: ${result.decision.rule?.type} contains "${result.decision.rule?.value}"`
+                            : `AI suggestion: ${result.decision?.aiCategoryName || 'Unknown'}`}
+                        </span>
+                      </div>
+                      {result.labelApplied && (
+                        <div className="autosort-label">
+                          Gmail label: {result.labelApplied.name}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="calendar-container">
+          <h2>Calendar Assistant</h2>
+          <div className="controls">
+            <button 
+              onClick={fetchCalendarEvents}
+              disabled={calendarLoading}
+              className="btn btn-primary"
+            >
+              {calendarLoading ? 'Loading...' : 'Refresh Upcoming Events'}
+            </button>
+            <button 
+              onClick={fetchAvailability}
+              disabled={calendarLoading}
+              className="btn btn-secondary"
+            >
+              {calendarLoading ? 'Checking...' : 'Check Availability'}
+            </button>
+          </div>
+
+          <div className="calendar-grid">
+            <div className="calendar-panel">
+              <h3>Upcoming Events ({calendarEvents.length})</h3>
+              {calendarEvents.length === 0 ? (
+                <p>No events found for the next few days.</p>
+              ) : (
+                <ul className="calendar-list">
+                  {calendarEvents.map(event => (
+                    <li key={event.id} className="calendar-item">
+                      <strong>{event.summary || 'Untitled Event'}</strong>
+                        <div>{formatEventTime(event.start)} {'â†’'} {formatEventTime(event.end)}</div>
+                      {event.attendees?.length > 0 && (
+                        <div className="calendar-attendees">
+                          Attendees: {event.attendees.map(attendee => attendee.email).join(', ')}
+                        </div>
+                      )}
+                      {event.hangoutLink && (
+                        <a href={event.hangoutLink} target="_blank" rel="noreferrer">
+                          Join meeting
+                        </a>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="calendar-panel">
+              <h3>Busy Slots</h3>
+              {busySlots.length === 0 ? (
+                <p>No busy times retrieved yet.</p>
+              ) : (
+                <ul className="calendar-list">
+                  {busySlots.map((slot, index) => (
+                    <li key={`${slot.start}-${index}`} className="calendar-item">
+                      {formatBusyWindow(slot)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          <div className="calendar-form-wrapper">
+            <h3>Schedule New Event</h3>
+            <form className="calendar-form" onSubmit={scheduleEvent}>
+              <label>
+                Title
+                <input
+                  type="text"
+                  value={newEvent.summary}
+                  onChange={(e) => handleNewEventChange('summary', e.target.value)}
+                  placeholder="Meeting subject"
+                  required
+                />
+              </label>
+              <label>
+                Description
+                <textarea
+                  value={newEvent.description}
+                  onChange={(e) => handleNewEventChange('description', e.target.value)}
+                  placeholder="Agenda or meeting notes"
+                  rows={3}
+                />
+              </label>
+              <label>
+                Location
+                <input
+                  type="text"
+                  value={newEvent.location}
+                  onChange={(e) => handleNewEventChange('location', e.target.value)}
+                  placeholder="Conference room or link"
+                />
+              </label>
+              <div className="date-time-row">
+                <label>
+                  Start
+                  <input
+                    type="datetime-local"
+                    value={newEvent.start}
+                    onChange={(e) => handleNewEventChange('start', e.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  End
+                  <input
+                    type="datetime-local"
+                    value={newEvent.end}
+                    onChange={(e) => handleNewEventChange('end', e.target.value)}
+                    required
+                  />
+                </label>
+              </div>
+              <label>
+                Attendees (comma separated emails)
+                <input
+                  type="text"
+                  value={newEvent.attendees}
+                  onChange={(e) => handleNewEventChange('attendees', e.target.value)}
+                  placeholder="person@example.com"
+                />
+              </label>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={newEvent.createMeetLink}
+                  onChange={(e) => handleNewEventChange('createMeetLink', e.target.checked)}
+                />
+                Create Google Meet link
+              </label>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={creatingEvent}
+              >
+                {creatingEvent ? 'Scheduling...' : 'Schedule Event'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </main>
+
+      {teamModal && (
+        <div className="team-modal-overlay" onClick={handleTeamModalClose}>
+          <div className="team-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="team-modal-header">
+              <h3>{teamModal.type === 'create' ? 'Create a Team' : 'Invite a Teammate'}</h3>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={handleTeamModalClose}
+                aria-label="Close modal"
+              >
+                &times;
+              </button>
+            </div>
+            {teamError && <div className="team-modal-error">{teamError}</div>}
+
+            {teamModal.type === 'create' && (
+              <form className="team-modal-body" onSubmit={handleCreateTeam}>
+                <label className="team-field">
+                  <span>Team name</span>
+                  <input
+                    type="text"
+                    value={teamForm.name}
+                    onChange={(event) => handleTeamFormChange('name', event.target.value)}
+                    placeholder="e.g. Customer Success"
+                    required
+                  />
+                </label>
+                <div className="team-modal-footer">
+                  <button type="button" className="btn btn-secondary" onClick={handleTeamModalClose}>
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn btn-primary" disabled={teamLoading}>
+                    {teamLoading ? 'Creating...' : 'Create team'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {teamModal.type === 'invite' && (
+              <form className="team-modal-body" onSubmit={handleInviteMember}>
+                <label className="team-field">
+                  <span>Teammate email</span>
+                  <input
+                    type="email"
+                    value={teamForm.inviteEmail}
+                    onChange={(event) => handleTeamFormChange('inviteEmail', event.target.value)}
+                    placeholder="name@example.com"
+                    required
+                  />
+                </label>
+                <label className="team-field">
+                  <span>Role</span>
+                  <select
+                    value={teamForm.inviteRole}
+                    onChange={(event) => handleTeamFormChange('inviteRole', event.target.value)}
+                  >
+                    <option value="member">Member</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </label>
+                <p className="team-modal-hint">
+                  Admins can invite teammates and manage shared inbox rules.
+                </p>
+                <div className="team-modal-footer">
+                  <button type="button" className="btn btn-secondary" onClick={handleTeamModalClose}>
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn btn-primary" disabled={teamLoading || !activeTeamId}>
+                    {teamLoading ? 'Sending...' : 'Send invite'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {followUpModal && (
+        <div className="followup-modal-overlay" onClick={closeFollowUpModal}>
+          <form className="followup-modal" onClick={(e) => e.stopPropagation()} onSubmit={submitFollowUpApproval}>
+            <div className="followup-modal-header">
+              <h3>Review Follow-Up</h3>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={closeFollowUpModal}
+                aria-label="Close modal"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="followup-modal-body">
+              <p className="followup-placeholder">
+                Sending to {followUpModal.task.counterpartEmail || 'unknown recipient'}
+              </p>
+              <label>
+                Subject
+                <input
+                  type="text"
+                  value={followUpModal.subject}
+                  onChange={(event) =>
+                    setFollowUpModal(prev => ({ ...prev, subject: event.target.value }))
+                  }
+                  required
+                />
+              </label>
+              <label>
+                Send at
+                <input
+                  type="datetime-local"
+                  value={followUpModal.sendAt || ''}
+                  onChange={(event) =>
+                    setFollowUpModal(prev => ({ ...prev, sendAt: event.target.value }))
+                  }
+                  required
+                />
+              </label>
+              <label>
+                Message
+                <textarea
+                  value={followUpModal.body}
+                  onChange={(event) =>
+                    setFollowUpModal(prev => ({ ...prev, body: event.target.value }))
+                  }
+                  required
+                />
+              </label>
+            </div>
+            <div className="followup-modal-footer">
+              <button type="button" className="btn btn-secondary" onClick={closeFollowUpModal}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={followUpActionId === followUpModal.task.id}
+              >
+                {followUpActionId === followUpModal.task.id ? 'Scheduling...' : 'Schedule send'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {actionModal && (
+        <div className="action-modal-overlay" onClick={closeActionModal}>
+          <div className="action-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="action-modal-header">
+              <h3>
+                {actionModal.type === 'draft_reply' && 'Draft Reply'}
+                {actionModal.type === 'schedule_meeting' && 'Suggested Meeting Times'}
+              </h3>
+              <button className="modal-close" onClick={closeActionModal} aria-label="Close modal">
+                &times;
+              </button>
+            </div>
+
+            {actionModal.type === 'draft_reply' && (
+              <div className="action-modal-body">
+                <p className="action-modal-subtitle">
+                  Reply to: {actionModal.email?.from || 'Unknown sender'}
+                </p>
+                <textarea className="draft-preview" readOnly value={actionModal.draft || ''} />
+                <div className="action-modal-footer">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => copyToClipboard(actionModal.draft || '')}
+                  >
+                    Copy Draft
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={async () => {
+                      await handleUndoAction({
+                        actionId: actionModal.actionId,
+                        emailId: actionModal.email?.emailId,
+                        actionType: 'draft_reply'
+                      });
+                      closeActionModal();
+                    }}
+                  >
+                    Undo Action
+                  </button>
+                  <button type="button" className="btn btn-primary" onClick={closeActionModal}>
+                    Close
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {actionModal.type === 'schedule_meeting' && (
+              <div className="action-modal-body">
+                <p className="action-modal-subtitle">
+                  Suggested windows for {actionModal.email?.from || 'the requester'}:
+                </p>
+                {actionModal.suggestions?.length ? (
+                  <ul className="suggestions-list">
+                    {actionModal.suggestions.map((slot, idx) => {
+                      const start = new Date(slot.start);
+                      const end = new Date(slot.end);
+                      const label = `${start.toLocaleString()} -> ${end.toLocaleTimeString()}`;
+                      return (
+                        <li key={`${slot.start}-${idx}`}>
+                          <span>{label}</span>
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => copyToClipboard(label)}
+                          >
+                            Copy
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p>No open times were available in the next week.</p>
+                )}
+                <div className="action-modal-footer">
+                  {actionModal.suggestions?.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={async () => {
+                        await handleUndoAction({
+                          actionId: actionModal.actionId,
+                          emailId: actionModal.email?.emailId,
+                          actionType: 'schedule_meeting'
+                        });
+                        closeActionModal();
+                      }}
+                    >
+                      Undo Action
+                    </button>
+                  )}
+                  <button type="button" className="btn btn-primary" onClick={closeActionModal}>
+                    Close
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {actionToast && (
+        <div className={`toast ${actionToast.error ? 'error' : ''}`}>
+          <span>{actionToast.message}</span>
+          <div className="toast-actions">
+            {actionToast.undoAvailable && actionToast.actionId && (
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => handleUndoAction(actionToast)}
+              >
+                Undo
+              </button>
+            )}
+            <button
+              type="button"
+              className="toast-close"
+              onClick={dismissToast}
+              aria-label="Dismiss toast"
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
+
+
+
+
+
+
+
+
+
+
+
+
