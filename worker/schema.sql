@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS email_categories (
   FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_email_categories_user_name ON email_categories (user_id, name);
+
 CREATE TABLE IF NOT EXISTS email_rules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -159,16 +161,23 @@ CREATE TABLE IF NOT EXISTS meeting_briefs (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_briefs_unique ON meeting_briefs (team_id, owner_user_id, calendar_event_id);
 
 -- Seed helper categories
-INSERT INTO email_categories (user_id, name, description, color)
-SELECT users.id, cat.name, cat.description, cat.color
-FROM users
-CROSS JOIN (VALUES
-  ('Work', 'Work-related emails', '#007bff'),
-  ('Personal', 'Personal emails', '#28a745'),
-  ('Newsletter', 'Newsletters and subscriptions', '#ffc107'),
-  ('Receipt', 'Purchase receipts and confirmations', '#17a2b8'),
-  ('Promotion', 'Promotional and marketing emails', '#fd7e14'),
-  ('Social', 'Social media notifications', '#e83e8c'),
-  ('Important', 'Important emails requiring attention', '#dc3545')
-) AS cat(name, description, color)
-ON CONFLICT DO NOTHING;
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Work', 'Work-related emails', '#007bff' FROM users;
+
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Personal', 'Personal emails', '#28a745' FROM users;
+
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Newsletter', 'Newsletters and subscriptions', '#ffc107' FROM users;
+
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Receipt', 'Purchase receipts and confirmations', '#17a2b8' FROM users;
+
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Promotion', 'Promotional and marketing emails', '#fd7e14' FROM users;
+
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Social', 'Social media notifications', '#e83e8c' FROM users;
+
+INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
+SELECT id, 'Important', 'Important emails requiring attention', '#dc3545' FROM users;

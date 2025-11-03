@@ -8,16 +8,8 @@ ENVIRONMENT = "production"
 [[d1_databases]]
 binding = "DB"
 database_name = "vaai-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "82a1eb01-5f21-4d97-9a93-1e2cee526069"
 
 [[kv_namespaces]]
 binding = "OAUTH_STATE"
-id = "00000000000000000000000000000000"
-
-# Secrets to configure via `wrangler secret put`
-# - GOOGLE_CLIENT_ID
-# - GOOGLE_CLIENT_SECRET
-# - GOOGLE_REDIRECT_URI
-# - FRONTEND_REDIRECT_URI
-# - JWT_SECRET
-# - OPENAI_API_KEY
+id = "99f6cccf90df48dea49b9f22a91d1317"
