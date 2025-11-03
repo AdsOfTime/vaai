@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+build: { sourcemap: true }
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
