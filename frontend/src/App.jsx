@@ -105,10 +105,6 @@ function App() {
     () => followUps.length,
     [followUps]
   );
-  const upcomingMeetingCount = useMemo(
-    () => filteredMeetingBriefs.length,
-    [filteredMeetingBriefs]
-  );
   const meetingFilters = useMemo(() => [
     {
       id: 'upcoming',
@@ -145,8 +141,12 @@ function App() {
       predicate: null
     }
   ], []);
-  const [meetingView, setMeetingView] = useState('upcoming');
   const [filteredMeetingBriefs, setFilteredMeetingBriefs] = useState([]);
+  const upcomingMeetingCount = useMemo(
+    () => filteredMeetingBriefs.length,
+    [filteredMeetingBriefs]
+  );
+  const [meetingView, setMeetingView] = useState('upcoming');
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantMessages, setAssistantMessages] = useState([
     {
