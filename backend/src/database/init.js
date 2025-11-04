@@ -22,7 +22,6 @@ function initDatabase() {
 function createTables() {
   return new Promise((resolve, reject) => {
     const queries = [
-      // Users table
       `CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT UNIQUE NOT NULL,
@@ -32,8 +31,6 @@ function createTables() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
-      
-      // Email categories table
       `CREATE TABLE IF NOT EXISTS email_categories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -43,13 +40,11 @@ function createTables() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-      
-      // Email rules table
       `CREATE TABLE IF NOT EXISTS email_rules (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         category_id INTEGER NOT NULL,
-        rule_type TEXT NOT NULL, -- 'sender', 'subject', 'content', 'ai'
+        rule_type TEXT NOT NULL,
         rule_value TEXT NOT NULL,
         priority INTEGER DEFAULT 0,
         is_active BOOLEAN DEFAULT 1,
@@ -57,8 +52,6 @@ function createTables() {
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
         FOREIGN KEY (category_id) REFERENCES email_categories (id) ON DELETE CASCADE
       )`,
-      
-      // Processed emails table (for learning)
       `CREATE TABLE IF NOT EXISTS processed_emails (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -73,8 +66,6 @@ function createTables() {
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
         FOREIGN KEY (category_id) REFERENCES email_categories (id) ON DELETE SET NULL
       )`,
-
-      // Assistant actions log
       `CREATE TABLE IF NOT EXISTS assistant_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -90,8 +81,6 @@ function createTables() {
         feedback TEXT,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-
-      // Teams table
       `CREATE TABLE IF NOT EXISTS teams (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -99,8 +88,6 @@ function createTables() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-
-      // Team members table
       `CREATE TABLE IF NOT EXISTS team_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         team_id INTEGER NOT NULL,
@@ -112,8 +99,6 @@ function createTables() {
         FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE CASCADE,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-
-      // Team invitations table
       `CREATE TABLE IF NOT EXISTS team_invitations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         team_id INTEGER NOT NULL,
@@ -127,12 +112,8 @@ function createTables() {
         FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE CASCADE,
         FOREIGN KEY (invited_by_user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-
-      // Helpful indexes for teams
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_team_members_unique ON team_members (team_id, user_id)`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_team_invitations_token ON team_invitations (token)`,
-
-      // Follow-up tasks table
       `CREATE TABLE IF NOT EXISTS follow_up_tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         team_id INTEGER NOT NULL,
@@ -157,8 +138,6 @@ function createTables() {
         FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE CASCADE,
         FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-
-      // Follow-up events table
       `CREATE TABLE IF NOT EXISTS follow_up_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         follow_up_id INTEGER NOT NULL,
@@ -167,11 +146,8 @@ function createTables() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (follow_up_id) REFERENCES follow_up_tasks (id) ON DELETE CASCADE
       )`,
-
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_up_unique ON follow_up_tasks (team_id, owner_user_id, thread_id, last_message_id)`,
       `CREATE INDEX IF NOT EXISTS idx_follow_up_status_due ON follow_up_tasks (status, due_at)`,
-
-      // Meeting briefs table
       `CREATE TABLE IF NOT EXISTS meeting_briefs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         team_id INTEGER NOT NULL,
@@ -189,24 +165,26 @@ function createTables() {
         FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE CASCADE,
         FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE CASCADE
       )`,
-
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_briefs_unique ON meeting_briefs (team_id, owner_user_id, calendar_event_id)`
     ];
 
-    let completed = 0;
-    queries.forEach((query, index) => {
-      db.run(query, (err) => {
-        if (err) {
-          console.error(`Error creating table ${index}:`, err);
-          reject(err);
-          return;
-        }
-        completed++;
-        if (completed === queries.length) {
+    db.serialize(() => {
+      const runNext = (index) => {
+        if (index === queries.length) {
           console.log('All database tables created successfully');
           resolve();
+          return;
         }
-      });
+        db.run(queries[index], (err) => {
+          if (err) {
+            console.error(`Error creating table ${index}:`, err);
+            reject(err);
+            return;
+          }
+          runNext(index + 1);
+        });
+      };
+      runNext(0);
     });
   });
 }
