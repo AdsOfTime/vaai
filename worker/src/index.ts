@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+﻿import { Hono } from 'hono'
 import type { Context, MiddlewareHandler } from 'hono'
 import type { D1Database } from '@cloudflare/workers-types'
 import { cors } from 'hono/cors'
@@ -24,6 +24,8 @@ import {
   googleDocsBatchUpdate,
   googleDocsCreateDocument,
   googleDriveGetFile,
+  googleDriveCopyFile,
+  googleDriveListFiles,
   googleDriveUpdateParents,
   googleSheetsAppendValues,
   googleTasksInsert,
@@ -71,6 +73,47 @@ type TeamRow = {
   status?: string
   invited_at?: string
   joined_at?: string
+}
+
+function convertMarkdownToPlain(markdown: string): string {
+  const normalized = markdown.replace(/\r\n/g, '\n')
+  let inCodeBlock = false
+
+  const lines = normalized.split('\n').map((rawLine) => {
+    if (/^\s*```/.test(rawLine)) {
+      inCodeBlock = !inCodeBlock
+      return ''
+    }
+
+    let line = rawLine.replace(/\s+$/, '')
+    if (inCodeBlock) {
+      return line
+    }
+
+    line = line.replace(/`([^`]*)`/g, '$1')
+    line = line.replace(/\*\*(.*?)\*\*/g, '$1')
+    line = line.replace(/__(.*?)__/g, '$1')
+    line = line.replace(/\*(.*?)\*/g, '$1')
+    line = line.replace(/_(.*?)_/g, '$1')
+    line = line.replace(/~~(.*?)~~/g, '$1')
+    line = line.replace(/!\[[^\]]*]\([^)]+\)/g, '')
+    line = line.replace(/\[([^\]]+)]\(([^)]+)\)/g, '$1 ($2)')
+
+    if (/^\s*#{1,6}\s+/.test(line)) {
+      line = line.replace(/^\s*#{1,6}\s+/, '')
+    } else if (/^\s*[-+*]\s+/.test(line)) {
+      line = line.replace(/^\s*[-+*]\s+/, '- ')
+    } else if (/^\s*\d+\.\s+/.test(line)) {
+      line = line.replace(/^\s*(\d+)\.\s+/, '$1. ')
+    } else if (/^\s*>+\s*/.test(line)) {
+      line = line.replace(/^\s*>+\s*/, '> ')
+    }
+
+    return line.trimEnd()
+  })
+
+  const result = lines.join('\n').replace(/\n{3,}/g, '\n\n')
+  return result.trim()
 }
 
 type TeamMemberRow = {
@@ -159,6 +202,34 @@ type FollowUpTask = {
   sentAt: string | null
   createdAt: string
   updatedAt: string
+}
+
+type BriefingAction = {
+  type: string
+  label: string
+  payload: Record<string, unknown>
+}
+
+type BriefingItem = {
+  emailId: string
+  threadId?: string
+  subject: string
+  from: string
+  snippet: string
+  body: string
+  receivedAt: string
+  intent: string
+  suggestedAction: string
+  labels: string[]
+  actions: BriefingAction[]
+  handled: boolean
+  lastAction: {
+    actionId?: number | null
+    actionType?: string | null
+    status?: string | null
+    undoneAt?: string | null
+    feedback?: { rating?: string | null; note?: string | null } | null
+  } | null
 }
 
 type FollowUpContext = {
@@ -1667,32 +1738,133 @@ api.get('/assistant/actions/metrics', async (c) => {
   }
 })
 
+api.get('/google/docs/templates', async (c) => {
+  try {
+    await resolveCurrentUser(c)
+    const authed = c.get('user')
+    const googleId = getGoogleIdFromPayload(authed)
+    const { clientId, clientSecret } = getGoogleConfig(c.env)
+
+    const folderId = c.req.query('folderId') || undefined
+    const search = c.req.query('search') || undefined
+    const pageSizeParam = c.req.query('pageSize')
+    const pageSize = pageSizeParam ? Number.parseInt(pageSizeParam, 10) : undefined
+    const pageToken = c.req.query('pageToken') || undefined
+
+    const list = await googleDriveListFiles({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      mimeType: 'application/vnd.google-apps.document',
+      folderId,
+      search,
+      pageSize,
+      pageToken,
+      supportsAllDrives: true
+    })
+
+    return c.json({
+      files: list.files ?? [],
+      nextPageToken: list.nextPageToken ?? null
+    })
+  } catch (error) {
+    return handleRouteError(c, error, 'Unable to load document templates')
+  }
+})
+
 api.post('/google/docs', async (c) => {
   try {
     const user = await resolveCurrentUser(c)
     const authed = c.get('user')
     const googleId = getGoogleIdFromPayload(authed)
     const { clientId, clientSecret } = getGoogleConfig(c.env)
-    const body = await parseJson<{ title?: string; content?: string; folderId?: string }>(c)
+    const body = await parseJson<{
+      title?: string
+      content?: string
+      folderId?: string
+      templateDocumentId?: string
+      contentFormat?: string
+    }>(c)
 
-    if (!body?.title) {
+    const title = body?.title?.trim()
+    if (!title) {
       return c.json({ error: 'Document title is required' }, 400)
     }
 
-    const document = await googleDocsCreateDocument({
-      db: c.env.DB,
-      googleId,
-      clientId,
-      clientSecret,
-      title: body.title
-    })
+    const folderId = body.folderId?.trim() || undefined
+    const templateDocumentId = body.templateDocumentId?.trim() || undefined
+    const contentFormat = (body.contentFormat || 'markdown').toLowerCase() === 'plain' ? 'plain' : 'markdown'
+    const content = body.content?.trim() || ''
 
-    const documentId = document.documentId
-    if (!documentId) {
-      throw new Error('Google Docs response missing documentId')
+    let documentId: string | undefined
+    let documentTitle = title
+
+    if (templateDocumentId) {
+      const copy = await googleDriveCopyFile({
+        db: c.env.DB,
+        googleId,
+        clientId,
+        clientSecret,
+        fileId: templateDocumentId,
+        name: title,
+        parents: folderId ? [folderId] : undefined,
+        supportsAllDrives: true
+      })
+
+      documentId = copy.id
+      documentTitle = copy.name ?? title
+      if (!documentId) {
+        throw new Error('Failed to copy template document')
+      }
+    } else {
+      const created = await googleDocsCreateDocument({
+        db: c.env.DB,
+        googleId,
+        clientId,
+        clientSecret,
+        title
+      })
+
+      documentId = created.documentId
+      documentTitle = created.title ?? title
+      if (!documentId) {
+        throw new Error('Google Docs response missing documentId')
+      }
+
+      if (folderId) {
+        try {
+          const existing = await googleDriveGetFile({
+            db: c.env.DB,
+            googleId,
+            clientId,
+            clientSecret,
+            fileId: documentId,
+            fields: 'parents',
+            supportsAllDrives: true
+          })
+          const previousParents = existing.parents?.join(',') || undefined
+          await googleDriveUpdateParents({
+            db: c.env.DB,
+            googleId,
+            clientId,
+            clientSecret,
+            fileId: documentId,
+            addParents: folderId,
+            removeParents: previousParents,
+            supportsAllDrives: true
+          })
+        } catch (err) {
+          console.error('Failed to move Google Doc into folder:', err)
+        }
+      }
     }
 
-    if (body.content) {
+    if (content) {
+      const normalizedContent =
+        contentFormat === 'markdown' ? convertMarkdownToPlain(content) : content
+      const text = normalizedContent.endsWith('\n') ? normalizedContent : `${normalizedContent}\n`
+
       await googleDocsBatchUpdate({
         db: c.env.DB,
         googleId,
@@ -1702,43 +1874,19 @@ api.post('/google/docs', async (c) => {
         requests: [
           {
             insertText: {
-              text: body.content,
-              endOfSegmentLocation: { segmentId: '' }
+              text,
+              location: { index: 1 }
             }
           }
         ]
       })
     }
 
-    if (body.folderId) {
-      try {
-        const existing = await googleDriveGetFile({
-          db: c.env.DB,
-          googleId,
-          clientId,
-          clientSecret,
-          fileId: documentId,
-          fields: 'parents'
-        })
-        const previousParents = existing.parents?.join(',') || undefined
-        await googleDriveUpdateParents({
-          db: c.env.DB,
-          googleId,
-          clientId,
-          clientSecret,
-          fileId: documentId,
-          addParents: body.folderId,
-          removeParents: previousParents
-        })
-      } catch (err) {
-        console.error('Failed to move Google Doc into folder:', err)
-      }
-    }
-
     return c.json({
       document: {
         documentId,
-        title: document.title ?? body.title,
+        title: documentTitle,
+        templateId: templateDocumentId || null,
         documentLink: `https://docs.google.com/document/d/${documentId}/edit`
       }
     }, 201)
@@ -1824,6 +1972,41 @@ api.post('/google/sheets/append', async (c) => {
     }, 201)
   } catch (error) {
     return handleRouteError(c, error, 'Failed to append rows to sheet')
+  }
+})
+
+api.get('/google/sheets/list', async (c) => {
+  try {
+    await resolveCurrentUser(c)
+    const authed = c.get('user')
+    const googleId = getGoogleIdFromPayload(authed)
+    const { clientId, clientSecret } = getGoogleConfig(c.env)
+
+    const folderId = c.req.query('folderId') || undefined
+    const search = c.req.query('search') || undefined
+    const pageSizeParam = c.req.query('pageSize')
+    const pageSize = pageSizeParam ? Number.parseInt(pageSizeParam, 10) : undefined
+    const pageToken = c.req.query('pageToken') || undefined
+
+    const list = await googleDriveListFiles({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+      folderId,
+      search,
+      pageSize,
+      pageToken,
+      supportsAllDrives: true
+    })
+
+    return c.json({
+      files: list.files ?? [],
+      nextPageToken: list.nextPageToken ?? null
+    })
+  } catch (error) {
+    return handleRouteError(c, error, 'Unable to load spreadsheets')
   }
 })
 
@@ -2075,6 +2258,129 @@ api.post('/google/tasks/:taskId/complete', async (c) => {
     return c.json({ task })
   } catch (error) {
     return handleRouteError(c, error, 'Unable to complete task')
+  }
+})
+
+api.get('/briefing', async (c) => {
+  try {
+    const user = await resolveCurrentUser(c)
+    const authed = c.get('user')
+    const googleId = getGoogleIdFromPayload(authed)
+    const { clientId, clientSecret } = getGoogleConfig(c.env)
+
+    const timeframeHoursParam = c.req.query('hours')
+    const maxEmailsParam = c.req.query('limit')
+    const timeframeHours = Number.isFinite(Number(timeframeHoursParam))
+      ? Math.max(Number(timeframeHoursParam), 1)
+      : 24
+    const maxEmails = Number.isFinite(Number(maxEmailsParam))
+      ? Math.max(Number(maxEmailsParam), 1)
+      : 20
+
+    const queryParts = [`newer_than:${timeframeHours}h`, 'in:inbox', '-category:{forums promotions}']
+    const list = await gmailListMessages({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      maxResults: maxEmails,
+      query: queryParts.join(' ')
+    })
+
+    const messages = list.messages ?? []
+    if (messages.length === 0) {
+      return c.json({
+        generatedAt: new Date().toISOString(),
+        summary: 'No new emails in the selected timeframe.',
+        items: [],
+        metadata: {
+          timeframeHours,
+          maxEmails,
+          fetched: 0,
+          query: queryParts.join(' ')
+        }
+      })
+    }
+
+    const items: BriefingItem[] = []
+
+    for (const message of messages) {
+      try {
+        const full = await gmailGetMessage({
+          db: c.env.DB,
+          googleId,
+          clientId,
+          clientSecret,
+          id: message.id,
+          format: 'full'
+        })
+
+        const subjectRaw = getHeader(full.payload, 'Subject')
+        const fromRaw = getHeader(full.payload, 'From')
+        const subject = subjectRaw || '(No subject)'
+        const from = fromRaw || '(Unknown sender)'
+        const body = trimContent(extractPlainBody(full.payload) || full.snippet || '', 4000)
+        const snippet = trimContent(full.snippet || '', 260)
+        const receivedAt = full.internalDate
+          ? new Date(Number(full.internalDate)).toISOString()
+          : new Date().toISOString()
+
+        const heuristic = quickBriefingHeuristic({ subject, body })
+        let intent = heuristic?.intent ?? 'general'
+        let suggestedAction = heuristic?.suggestedAction ?? defaultSuggestedAction(intent)
+
+        if (!heuristic || heuristic.intent === 'general') {
+          const aiIntent = await classifyBriefingIntent(c.env, {
+            subject,
+            from,
+            body
+          })
+          intent = aiIntent.intent || intent
+          suggestedAction = aiIntent.suggestedAction || suggestedAction
+        }
+
+        const actions = buildBriefingActions(intent, {
+          emailId: full.id,
+          threadId: full.threadId,
+          subject,
+          from
+        })
+
+        items.push({
+          emailId: full.id,
+          threadId: full.threadId ?? undefined,
+          subject,
+          from,
+          snippet,
+          body,
+          receivedAt,
+          intent,
+          suggestedAction,
+          labels: full.labelIds ?? [],
+          actions,
+          handled: false,
+          lastAction: null
+        })
+      } catch (err) {
+        console.error('Failed to process email for briefing', err)
+      }
+    }
+
+    const summary = await summarizeBriefingItems(c.env, items)
+
+    return c.json({
+      generatedAt: new Date().toISOString(),
+      summary,
+      items,
+      metadata: {
+        timeframeHours,
+        maxEmails,
+        fetched: items.length,
+        query: queryParts.join(' ')
+      }
+    })
+  } catch (error) {
+    return handleRouteError(c, error, 'Unable to load briefing')
   }
 })
 
@@ -2617,6 +2923,254 @@ function trimContent(content: string, maxLength = 2000) {
   return condensed.length > maxLength ? condensed.slice(0, maxLength) : condensed
 }
 
+function defaultSuggestedAction(intent: string) {
+  switch (intent) {
+    case 'meeting_request':
+      return 'Propose meeting times from calendar availability.'
+    case 'follow_up':
+      return 'Send a follow-up reply or set a reminder.'
+    case 'invoice':
+    case 'expense':
+      return 'Forward to finance or mark as paid.'
+    case 'urgent':
+      return 'Respond immediately or escalate.'
+    case 'newsletter':
+      return 'Skim and archive if not critical.'
+    case 'promotion':
+      return 'Review briefly and archive if not needed.'
+    default:
+      return 'Review and respond as needed.'
+  }
+}
+
+function quickBriefingHeuristic(email: { subject: string; body: string }) {
+  const subject = normalizeString(email.subject)
+  const body = normalizeString(email.body)
+
+  if (subject.includes('invoice') || body.includes('invoice') || body.includes('bill')) {
+    return { intent: 'invoice', suggestedAction: defaultSuggestedAction('invoice') }
+  }
+  if (subject.includes('receipt') || body.includes('receipt') || body.includes('expense')) {
+    return { intent: 'expense', suggestedAction: defaultSuggestedAction('expense') }
+  }
+  if (subject.includes('meeting') || subject.includes('schedule') || body.includes('calendar')) {
+    return { intent: 'meeting_request', suggestedAction: defaultSuggestedAction('meeting_request') }
+  }
+  if (subject.includes('follow up') || body.includes('follow-up') || body.includes('circle back')) {
+    return { intent: 'follow_up', suggestedAction: defaultSuggestedAction('follow_up') }
+  }
+  if (subject.includes('urgent') || body.includes('urgent') || body.includes('asap')) {
+    return { intent: 'urgent', suggestedAction: defaultSuggestedAction('urgent') }
+  }
+  if (subject.includes('newsletter') || body.includes('unsubscribe')) {
+    return { intent: 'newsletter', suggestedAction: defaultSuggestedAction('newsletter') }
+  }
+  if (subject.includes('promo') || body.includes('sale') || body.includes('discount')) {
+    return { intent: 'promotion', suggestedAction: defaultSuggestedAction('promotion') }
+  }
+  return null
+}
+
+async function classifyBriefingIntent(env: EnvBindings, email: { subject: string; from: string; body: string }) {
+  const heuristic = quickBriefingHeuristic(email)
+  if (heuristic) {
+    return heuristic
+  }
+
+  const fallbackIntent = 'general'
+  if (!env.OPENAI_API_KEY) {
+    return {
+      intent: fallbackIntent,
+      suggestedAction: defaultSuggestedAction(fallbackIntent)
+    }
+  }
+
+  const prompt = `
+You are an executive assistant that classifies email intent and recommends the next action.
+
+Email details:
+From: ${email.from}
+Subject: ${email.subject}
+Body: ${trimContent(email.body, 1200)}
+
+Respond with strict JSON containing:
+{
+  "intent": one of ["meeting_request","follow_up","invoice","expense","urgent","newsletter","promotion","general"],
+  "suggestedAction": string (<= 20 words)
+}
+`
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.2,
+        max_tokens: 200,
+        messages: [
+          { role: 'system', content: 'You output only valid JSON objects.' },
+          { role: 'user', content: prompt }
+        ]
+      })
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      console.error('OpenAI briefing intent error', text)
+      throw new Error('OpenAI request failed')
+    }
+
+    const data = await response.json<{
+      choices?: { message?: { content?: string } }[]
+    }>()
+
+    const content = data.choices?.[0]?.message?.content?.trim()
+    if (!content) {
+      throw new Error('Empty OpenAI response')
+    }
+
+    const parsed = JSON.parse(content)
+    const intent = typeof parsed.intent === 'string' ? parsed.intent : fallbackIntent
+    const suggestedAction = typeof parsed.suggestedAction === 'string'
+      ? parsed.suggestedAction
+      : defaultSuggestedAction(intent)
+
+    return {
+      intent,
+      suggestedAction
+    }
+  } catch (error) {
+    console.error('Briefing intent classification failed', error)
+    return {
+      intent: fallbackIntent,
+      suggestedAction: defaultSuggestedAction(fallbackIntent)
+    }
+  }
+}
+
+async function summarizeBriefingItems(env: EnvBindings, items: BriefingItem[]) {
+  if (!items.length) {
+    return 'No new emails in the selected timeframe.'
+  }
+
+  if (!env.OPENAI_API_KEY) {
+    const counts = items.reduce<Record<string, number>>((acc, item) => {
+      acc[item.intent] = (acc[item.intent] || 0) + 1
+      return acc
+    }, {})
+
+    const topIntents = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([intent, count]) => `${count} ${intent.replace('_', ' ')} email${count > 1 ? 's' : ''}`)
+
+    const topSenders = items
+      .map((item) => item.from)
+      .filter(Boolean)
+      .slice(0, 3)
+
+    const lines = [
+      `- Processed ${items.length} email${items.length > 1 ? 's' : ''} in your inbox.`,
+      topIntents.length ? `- Top categories: ${topIntents.join(', ')}.` : '- Mix of general updates.',
+      topSenders.length ? `- Key senders: ${topSenders.join(', ')}` : '- Review highlighted messages below.'
+    ]
+
+    return lines.join('\n')
+  }
+
+  const prompt = `
+Summarize the following emails for an executive as concise bullet points (max 4 bullets).
+
+${items.map((item, index) => `Email ${index + 1}:
+From: ${item.from}
+Subject: ${item.subject}
+Intent: ${item.intent}
+Suggested action: ${item.suggestedAction}
+Snippet: ${trimContent(item.snippet || item.body, 400)}
+`).join('\n')}
+`
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.4,
+        max_tokens: 320,
+        messages: [
+          { role: 'system', content: 'You are an executive assistant who writes succinct bullet summaries.' },
+          { role: 'user', content: prompt }
+        ]
+      })
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      console.error('OpenAI briefing summary error', text)
+      throw new Error('OpenAI request failed')
+    }
+
+    const data = await response.json<{
+      choices?: { message?: { content?: string } }[]
+    }>()
+
+    const text = data.choices?.[0]?.message?.content?.trim()
+    if (!text) {
+      throw new Error('Empty OpenAI response')
+    }
+
+    return text
+  } catch (error) {
+    console.error('Briefing summary generation failed', error)
+    return '- Review highlighted emails below for today’s priorities.'
+  }
+}
+
+function buildBriefingActions(intent: string, context: { emailId: string; threadId?: string | null; subject: string; from: string }): BriefingAction[] {
+  const basePayload = {
+    emailId: context.emailId,
+    threadId: context.threadId ?? null,
+    subject: context.subject,
+    from: context.from
+  }
+
+  const actions: BriefingAction[] = [
+    {
+      type: 'draft_reply',
+      label: 'Draft Reply',
+      payload: basePayload
+    }
+  ]
+
+  if (intent === 'meeting_request') {
+    actions.push({
+      type: 'schedule_meeting',
+      label: 'Suggest Meeting Times',
+      payload: {
+        ...basePayload,
+        durationMinutes: 30
+      }
+    })
+  }
+
+  if (['invoice', 'expense', 'newsletter', 'promotion', 'general'].includes(intent)) {
+    actions.push({
+      type: 'mark_handled',
+      label: 'Mark Handled',
+      payload: basePayload
+    })
+  }
+
+  return actions
+}
 function normalizeAttendees(attendees?: Array<string | { email?: string | null }>) {
   if (!attendees || !Array.isArray(attendees)) return []
   return attendees
@@ -3788,3 +4342,4 @@ async function storeProcessedEmail(db: D1Database, userId: number, payload: {
     payload.isManualOverride
   ).run()
 }
+

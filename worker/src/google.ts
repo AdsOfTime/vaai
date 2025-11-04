@@ -620,7 +620,7 @@ async function driveRequest<T>(options: {
   clientId: string
   clientSecret: string
   path: string
-  method?: 'GET' | 'PATCH'
+  method?: 'GET' | 'PATCH' | 'POST'
   query?: Record<string, string | number | string[] | undefined>
   body?: unknown
 }) {
@@ -782,6 +782,7 @@ export async function googleDriveGetFile(params: {
   clientSecret: string
   fileId: string
   fields?: string
+  supportsAllDrives?: boolean
 }) {
   return driveRequest<{ parents?: string[] }>({
     db: params.db,
@@ -790,7 +791,9 @@ export async function googleDriveGetFile(params: {
     clientSecret: params.clientSecret,
     path: `files/${params.fileId}`,
     query: {
-      fields: params.fields ?? 'id, parents'
+      fields: params.fields ?? 'id, parents',
+      supportsAllDrives: params.supportsAllDrives ? 'true' : undefined,
+      includeItemsFromAllDrives: params.supportsAllDrives ? 'true' : undefined
     }
   })
 }
@@ -803,6 +806,7 @@ export async function googleDriveUpdateParents(params: {
   fileId: string
   addParents?: string
   removeParents?: string
+  supportsAllDrives?: boolean
 }) {
   return driveRequest<unknown>({
     db: params.db,
@@ -814,9 +818,90 @@ export async function googleDriveUpdateParents(params: {
     query: {
       addParents: params.addParents,
       removeParents: params.removeParents,
-      fields: 'id, parents'
+      fields: 'id, parents',
+      supportsAllDrives: params.supportsAllDrives ? 'true' : undefined,
+      includeItemsFromAllDrives: params.supportsAllDrives ? 'true' : undefined
     },
     body: {}
+  })
+}
+
+export async function googleDriveCopyFile(params: {
+  db: D1Database
+  googleId: string
+  clientId: string
+  clientSecret: string
+  fileId: string
+  name?: string
+  parents?: string[]
+  supportsAllDrives?: boolean
+}) {
+  return driveRequest<{ id?: string; name?: string; webViewLink?: string }>({
+    db: params.db,
+    googleId: params.googleId,
+    clientId: params.clientId,
+    clientSecret: params.clientSecret,
+    path: `files/${params.fileId}/copy`,
+    method: 'POST',
+    body: {
+      name: params.name,
+      parents: params.parents
+    },
+    query: {
+      fields: 'id, name, parents, webViewLink',
+      supportsAllDrives: params.supportsAllDrives ? 'true' : undefined,
+      includeItemsFromAllDrives: params.supportsAllDrives ? 'true' : undefined
+    }
+  })
+}
+
+export async function googleDriveListFiles(params: {
+  db: D1Database
+  googleId: string
+  clientId: string
+  clientSecret: string
+  mimeType?: string
+  folderId?: string
+  search?: string
+  pageSize?: number
+  pageToken?: string
+  supportsAllDrives?: boolean
+}) {
+  const conditions = ["mimeType != 'application/vnd.google-apps.folder'", 'trashed = false']
+  if (params.mimeType) {
+    conditions.push(`mimeType = '${params.mimeType}'`)
+  }
+  if (params.folderId) {
+    conditions.push(`'${params.folderId}' in parents`)
+  }
+  if (params.search) {
+    const sanitized = params.search.replace(/'/g, "\\'")
+    conditions.push(`name contains '${sanitized}'`)
+  }
+
+  const q = conditions.join(' and ')
+  const limit = typeof params.pageSize === 'number' && Number.isFinite(params.pageSize)
+    ? Math.min(Math.max(Math.floor(params.pageSize), 1), 100)
+    : 25
+
+  return driveRequest<{
+    files?: { id: string; name: string; mimeType?: string; parents?: string[]; webViewLink?: string }[]
+    nextPageToken?: string
+  }>({
+    db: params.db,
+    googleId: params.googleId,
+    clientId: params.clientId,
+    clientSecret: params.clientSecret,
+    path: 'files',
+    query: {
+      q,
+      fields: 'nextPageToken, files(id, name, mimeType, parents, webViewLink)',
+      orderBy: 'modifiedTime desc',
+      pageSize: limit,
+      pageToken: params.pageToken,
+      supportsAllDrives: params.supportsAllDrives ? 'true' : undefined,
+      includeItemsFromAllDrives: params.supportsAllDrives ? 'true' : undefined
+    }
   })
 }
 

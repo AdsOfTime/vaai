@@ -1,8 +1,61 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import axios from 'axios';
-axios.defaults.baseURL =
-  import.meta.env.VITE_API_BASE_URL || axios.defaults.baseURL
 import './App.css';
+
+axios.defaults.baseURL = import.meta.env.VITE_API_BASE_URL || axios.defaults.baseURL;
+
+function parseCsvText(text) {
+  const rows = [];
+  let currentValue = '';
+  let currentRow = [];
+  let inQuotes = false;
+
+  const pushValue = () => {
+    currentRow.push(currentValue.trim());
+    currentValue = '';
+  };
+
+  const pushRow = () => {
+    if (currentRow.length) {
+      rows.push(currentRow);
+    } else if (currentValue.trim().length) {
+      rows.push([currentValue.trim()]);
+    }
+    currentRow = [];
+    currentValue = '';
+  };
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        currentValue += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      pushValue();
+    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && next === '\n') {
+        i += 1;
+      }
+      pushValue();
+      pushRow();
+    } else {
+      currentValue += char;
+    }
+  }
+
+  if (currentValue.length || currentRow.length) {
+    pushValue();
+    pushRow();
+  }
+
+  return rows.filter((row) => row.some((cell) => cell.length > 0));
+}
 
 function App() {
   const [user, setUser] = useState(null);
@@ -73,15 +126,32 @@ function App() {
     subject: '',
     textBody: ''
   });
+  const defaultDocDestinationFolder = import.meta.env.VITE_DEFAULT_DOCS_FOLDER_ID || '';
+  const defaultDocTemplateFolder = import.meta.env.VITE_DEFAULT_DOC_TEMPLATE_FOLDER_ID || '';
+  const defaultSheetsFolder = import.meta.env.VITE_DEFAULT_SHEETS_FOLDER_ID || '';
+
   const [docsForm, setDocsForm] = useState({
     title: '',
-    content: ''
+    content: '',
+    contentFormat: (import.meta.env.VITE_DEFAULT_DOC_CONTENT_FORMAT || 'markdown'),
+    templateId: '',
+    folderId: defaultDocDestinationFolder
   });
+  const [docsTemplateFolderId, setDocsTemplateFolderId] = useState(defaultDocTemplateFolder);
+  const [docTemplateFolderInput, setDocTemplateFolderInput] = useState(defaultDocTemplateFolder);
+  const [docTemplates, setDocTemplates] = useState([]);
+  const [docTemplatesLoading, setDocTemplatesLoading] = useState(false);
+
   const [sheetsForm, setSheetsForm] = useState({
     spreadsheetId: '',
     range: '',
-    valuesText: ''
+    valuesText: '',
+    valueInputOption: 'USER_ENTERED'
   });
+  const [sheetCatalogFolderId, setSheetCatalogFolderId] = useState(defaultSheetsFolder);
+  const [sheetCatalogFolderInput, setSheetCatalogFolderInput] = useState(defaultSheetsFolder);
+  const [sheetCatalog, setSheetCatalog] = useState([]);
+  const [sheetCatalogLoading, setSheetCatalogLoading] = useState(false);
   const [reminderForm, setReminderForm] = useState({
     summary: '',
     start: '',
@@ -141,6 +211,27 @@ function App() {
       predicate: null
     }
   ], []);
+
+  const selectedTemplate = useMemo(
+    () => docTemplates.find((template) => template.id === docsForm.templateId),
+    [docTemplates, docsForm.templateId]
+  );
+
+  const selectedSheet = useMemo(
+    () => sheetCatalog.find((sheet) => sheet.id === sheetsForm.spreadsheetId),
+    [sheetCatalog, sheetsForm.spreadsheetId]
+  );
+
+  const sheetPreview = useMemo(() => {
+    if (!sheetsForm.valuesText.trim()) return [];
+    try {
+      return parseCsvText(sheetsForm.valuesText);
+    } catch (error) {
+      console.error('Failed to parse sheet values:', error);
+      return [];
+    }
+  }, [sheetsForm.valuesText]);
+
   const [filteredMeetingBriefs, setFilteredMeetingBriefs] = useState([]);
   const upcomingMeetingCount = useMemo(
     () => filteredMeetingBriefs.length,
@@ -172,6 +263,16 @@ function App() {
   const [subscriptionLoading, setSubscriptionLoading] = useState(false);
   const [subscriptionError, setSubscriptionError] = useState(null);
 
+  const baseApiUrl = axios.defaults.baseURL || '';
+  const workerBriefingsEnabled =
+    import.meta.env.VITE_ENABLE_WORKER_BRIEFINGS === 'true';
+  const briefingAvailable = useMemo(
+    () =>
+      !!baseApiUrl &&
+      (!baseApiUrl.includes('workers.dev') || workerBriefingsEnabled),
+    [baseApiUrl, workerBriefingsEnabled]
+  );
+
   useEffect(() => {
     if (token) {
       fetchUserInfo();
@@ -183,7 +284,7 @@ function App() {
       setSubscriptionLoading(true);
       setSubscriptionError(null);
       try {
-        const response = await axios.get('/api/monetization/subscription-tiers');
+        const response = await axios.get('/monetization/subscription-tiers');
         const tiers = response.data?.tiers || {};
         const preferredOrder = ['solo', 'business'];
         const normalized = Object.entries(tiers).map(([id, tier]) => ({
@@ -220,7 +321,13 @@ function App() {
   }, []);
 
   const refreshBriefing = async () => {
-    if (!token) return;
+    if (!token || !briefingAvailable) {
+      if (!briefingAvailable) {
+        setBriefing(null);
+        setBriefingError(null);
+      }
+      return;
+    }
 
     setBriefingLoading(true);
     setBriefingError(null);
@@ -259,6 +366,74 @@ function App() {
     setActionToast(null);
   };
 
+  const loadDocTemplates = useCallback(
+    async (folderOverride) => {
+      if (!token) {
+        setDocTemplates([]);
+        return;
+      }
+      setDocTemplatesLoading(true);
+      try {
+        const response = await axios.get('/api/google/docs/templates', {
+          headers: getAuthHeaders(),
+          params: {
+            folderId: folderOverride !== undefined ? folderOverride || undefined : docsTemplateFolderId || undefined
+          }
+        });
+        setDocTemplates(Array.isArray(response.data?.files) ? response.data.files : []);
+      } catch (error) {
+        console.error('Failed to load document templates:', error);
+        setDocTemplates([]);
+        if (!error.response?.status || error.response.status >= 500) {
+          showToast({ message: 'Unable to load document templates.', error: true });
+        }
+      } finally {
+        setDocTemplatesLoading(false);
+      }
+    },
+    [token, getAuthHeaders, docsTemplateFolderId]
+  );
+
+  const loadSheetCatalog = useCallback(
+    async (folderOverride) => {
+      if (!token) {
+        setSheetCatalog([]);
+        return;
+      }
+      setSheetCatalogLoading(true);
+      try {
+        const response = await axios.get('/api/google/sheets/list', {
+          headers: getAuthHeaders(),
+          params: {
+            folderId: folderOverride !== undefined ? folderOverride || undefined : sheetCatalogFolderId || undefined
+          }
+        });
+        setSheetCatalog(Array.isArray(response.data?.files) ? response.data.files : []);
+      } catch (error) {
+        console.error('Failed to load spreadsheets:', error);
+        setSheetCatalog([]);
+        if (!error.response?.status || error.response.status >= 500) {
+          showToast({ message: 'Unable to load spreadsheets.', error: true });
+        }
+      } finally {
+        setSheetCatalogLoading(false);
+      }
+    },
+    [token, getAuthHeaders, sheetCatalogFolderId]
+  );
+
+  const applyTemplateFolder = useCallback(() => {
+    const trimmed = docTemplateFolderInput.trim();
+    setDocsTemplateFolderId(trimmed);
+    loadDocTemplates(trimmed);
+  }, [docTemplateFolderInput, loadDocTemplates]);
+
+  const applySheetFolder = useCallback(() => {
+    const trimmed = sheetCatalogFolderInput.trim();
+    setSheetCatalogFolderId(trimmed);
+    loadSheetCatalog(trimmed);
+  }, [sheetCatalogFolderInput, loadSheetCatalog]);
+
   const updateBriefingItem = (emailId, updater) => {
     setBriefing(prev => {
       if (!prev) return prev;
@@ -276,6 +451,33 @@ function App() {
       clearTimeout(toastTimeoutRef.current);
     }
   }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setDocTemplates([]);
+      setSheetCatalog([]);
+      return;
+    }
+    loadDocTemplates(docsTemplateFolderId);
+    loadSheetCatalog(sheetCatalogFolderId);
+  }, [token, docsTemplateFolderId, sheetCatalogFolderId, loadDocTemplates, loadSheetCatalog]);
+
+  useEffect(() => {
+    setDocTemplateFolderInput(docsTemplateFolderId);
+  }, [docsTemplateFolderId]);
+
+  useEffect(() => {
+    setSheetCatalogFolderInput(sheetCatalogFolderId);
+  }, [sheetCatalogFolderId]);
+
+  useEffect(() => {
+    if (!sheetsForm.spreadsheetId && sheetCatalog.length > 0) {
+      setSheetsForm((prev) => ({
+        ...prev,
+        spreadsheetId: prev.spreadsheetId || sheetCatalog[0].id
+      }));
+    }
+  }, [sheetCatalog, sheetsForm.spreadsheetId]);
 
   const getAuthHeaders = useCallback(() => {
     const headers = {
@@ -591,7 +793,7 @@ function App() {
     setTasksLoading(true);
     setTasksError(null);
     try {
-      const response = await axios.get('/api/tasks', {
+      const response = await axios.get('/api/google/tasks', {
         headers: getAuthHeaders(),
         params: {
           showCompleted: taskShowCompleted,
@@ -648,7 +850,7 @@ function App() {
       }
 
       await axios.post(
-        '/api/tasks',
+        '/api/google/tasks',
         payload,
         {
           headers: {
@@ -674,7 +876,7 @@ function App() {
 
     try {
       await axios.post(
-        `/api/tasks/${taskId}/complete`,
+        `/api/google/tasks/${taskId}/complete`,
         {},
         { headers: getAuthHeaders() }
       );
@@ -746,12 +948,17 @@ function App() {
     }
     toggleAutomationLoading('doc', true);
     try {
+      const payload = {
+        title: docsForm.title.trim(),
+        content: docsForm.content?.trim() || undefined,
+        contentFormat: docsForm.contentFormat || 'markdown',
+        templateDocumentId: docsForm.templateId || undefined,
+        folderId: docsForm.folderId?.trim() || undefined
+      };
+
       const response = await axios.post(
         '/api/google/docs',
-        {
-          title: docsForm.title.trim(),
-          content: docsForm.content
-        },
+        payload,
         {
           headers: {
             ...getAuthHeaders(),
@@ -759,12 +966,25 @@ function App() {
           }
         }
       );
-      const link = response.data?.document?.documentLink;
+      const docInfo = response.data?.document;
+      const link = docInfo?.documentLink;
+      const docTitle = docInfo?.title || docsForm.title.trim();
+
       showToast({
-        message: link ? 'Google Doc created. Opening now…' : 'Google Doc created.',
-        persistent: false
+        message: link ? `Google Doc "${docTitle}" ready to edit.` : 'Google Doc created.',
+        persistent: false,
+        action: link
+          ? {
+              label: 'Open Doc',
+              onClick: () => window.open(link, '_blank', 'noopener')
+            }
+          : undefined
       });
-      setDocsForm({ title: '', content: '' });
+      setDocsForm((prev) => ({
+        ...prev,
+        title: '',
+        content: ''
+      }));
       if (link) {
         window.open(link, '_blank', 'noopener');
       }
@@ -789,10 +1009,7 @@ function App() {
       showToast({ message: 'Spreadsheet ID, range, and values are required.', error: true });
       return;
     }
-    const values = sheetsForm.valuesText
-      .split('\n')
-      .map(line => line.split(',').map(cell => cell.trim()))
-      .filter(row => row.some(cell => cell.length > 0));
+    const values = sheetPreview;
     if (!values.length) {
       showToast({ message: 'Enter at least one row of values.', error: true });
       return;
@@ -804,7 +1021,8 @@ function App() {
         {
           spreadsheetId: sheetsForm.spreadsheetId.trim(),
           range: sheetsForm.range.trim(),
-          values
+          values,
+          valueInputOption: sheetsForm.valueInputOption || 'USER_ENTERED'
         },
         {
           headers: {
@@ -813,8 +1031,20 @@ function App() {
           }
         }
       );
-      showToast({ message: 'Rows appended to Google Sheet.' });
-      setSheetsForm({ spreadsheetId: '', range: '', valuesText: '' });
+      const sheetInfo = sheetCatalog.find(item => item.id === sheetsForm.spreadsheetId.trim());
+      showToast({
+        message: 'Rows appended to Google Sheet.',
+        action: sheetInfo?.webViewLink
+          ? {
+              label: 'Open Sheet',
+              onClick: () => window.open(sheetInfo.webViewLink, '_blank', 'noopener')
+            }
+          : undefined
+      });
+      setSheetsForm(prev => ({
+        ...prev,
+        valuesText: ''
+      }));
     } catch (error) {
       console.error('Failed to append Google Sheet rows:', error);
       showToast({
@@ -866,10 +1096,14 @@ function App() {
   };
 
   const fetchMeetingBriefs = async () => {
-    if (!token || !activeTeamId) {
+    if (!token || !activeTeamId || !briefingAvailable) {
       setMeetingBriefs([]);
       setMeetingEventDetails(null);
       setMeetingEditMode(false);
+      if (!briefingAvailable) {
+        setMeetingBriefError(null);
+        setMeetingBriefLoading(false);
+      }
       return;
     }
 
@@ -1113,6 +1347,7 @@ function App() {
   };
 
   const handleMeetingBriefStatus = async (brief, status) => {
+    if (!token || !briefingAvailable) return;
     try {
       await axios.patch(
         `/api/meeting-briefs/${brief.id}`,
@@ -1132,7 +1367,10 @@ function App() {
   };
 
   const fetchActionMetrics = async (days = 7) => {
-    if (!token) {
+    if (!token || !briefingAvailable) {
+      if (!briefingAvailable) {
+        setActionMetrics(null);
+      }
       return;
     }
 
@@ -1154,12 +1392,12 @@ function App() {
   };
 
   useEffect(() => {
-    if (!token || !activeTeamId) {
+    if (!token || !activeTeamId || !briefingAvailable) {
       setActionMetrics(null);
       return;
     }
     fetchActionMetrics();
-  }, [token, activeTeamId]);
+  }, [token, activeTeamId, briefingAvailable]);
 
   useEffect(() => {
     if (token && activeTeamId) {
@@ -1170,7 +1408,7 @@ function App() {
   }, [token, activeTeamId]);
 
   useEffect(() => {
-    if (token && activeTeamId) {
+    if (token && activeTeamId && briefingAvailable) {
       fetchMeetingBriefs();
     } else {
       setMeetingBriefs([]);
@@ -1178,7 +1416,7 @@ function App() {
       setMeetingEventDetails(null);
       setMeetingEditMode(false);
     }
-  }, [token, activeTeamId, meetingScope, meetingRangeDays]);
+  }, [token, activeTeamId, meetingScope, meetingRangeDays, briefingAvailable]);
 
   useEffect(() => {
     const meetingFilter = meetingFilters.find(filter => filter.id === meetingView);
@@ -1204,7 +1442,7 @@ function App() {
   }, [token]);
 
   const handleBriefingAction = async (item, action) => {
-    if (!token) return;
+    if (!token || !briefingAvailable) return;
 
     const payload = {
       emailId: item.emailId,
@@ -1341,6 +1579,10 @@ function App() {
   };
 
   const handleUndoAction = async (toastInfo) => {
+    if (!briefingAvailable || !token) {
+      dismissToast();
+      return;
+    }
     if (!toastInfo?.actionId) {
       dismissToast();
       return;
@@ -1378,7 +1620,7 @@ function App() {
   };
 
   const handleActionFeedback = async ({ actionId, emailId, rating, note }) => {
-    if (!token || !actionId || !rating) {
+    if (!token || !actionId || !rating || !briefingAvailable) {
       return;
     }
 
@@ -1974,7 +2216,7 @@ function App() {
               {teamError && <div className="workspace-team-feedback workspace-team-feedback--error">{teamError}</div>}
               {acceptingInvite && (
                 <div className="workspace-team-feedback workspace-team-feedback--info">
-                  Accepting team invitation…
+                  Accepting team invitation...
                 </div>
               )}
             </div>
@@ -2024,7 +2266,7 @@ function App() {
                 onClick={refreshBriefing}
                 disabled={briefingLoading}
               >
-                {briefingLoading ? 'Refreshing briefing…' : 'Refresh briefing'}
+                {briefingLoading ? 'Refreshing briefing...' : 'Refresh briefing'}
               </button>
             </div>
           </div>
@@ -2095,7 +2337,7 @@ function App() {
               <label>
                 Message
                 <textarea
-                  placeholder="Draft message for the contact…"
+                  placeholder="Draft message for the contact..."
                   value={gmailForm.textBody}
                   onChange={(event) => setGmailForm(prev => ({ ...prev, textBody: event.target.value }))}
                   rows={4}
@@ -2104,7 +2346,7 @@ function App() {
                 />
               </label>
               <button type="submit" disabled={automationLoading.gmail}>
-                {automationLoading.gmail ? 'Sending…' : 'Send via Gmail'}
+                {automationLoading.gmail ? 'Sending...' : 'Send via Gmail'}
               </button>
             </form>
 
@@ -2124,18 +2366,99 @@ function App() {
                   disabled={automationLoading.doc}
                 />
               </label>
+              <div className="automation-subsection">
+                <label>
+                  Template (optional)
+                  <select
+                    value={docsForm.templateId}
+                    onChange={(event) => setDocsForm(prev => ({ ...prev, templateId: event.target.value }))}
+                    disabled={automationLoading.doc || docTemplatesLoading}
+                  >
+                    <option value="">Start from blank</option>
+                    {docTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="template-actions">
+                  <input
+                    type="text"
+                    placeholder="Template folder ID (optional)"
+                    value={docTemplateFolderInput}
+                    onChange={(event) => setDocTemplateFolderInput(event.target.value)}
+                    onBlur={() => setDocsTemplateFolderId(docTemplateFolderInput.trim())}
+                    disabled={automationLoading.doc}
+                  />
+                  <div className="template-action-buttons">
+                    <button
+                      type="button"
+                      onClick={applyTemplateFolder}
+                      disabled={docTemplatesLoading || automationLoading.doc}
+                    >
+                      {docTemplatesLoading ? 'Refreshing...' : 'Refresh templates'}
+                    </button>
+                    {selectedTemplate?.webViewLink && (
+                      <button
+                        type="button"
+                        onClick={() => window.open(selectedTemplate.webViewLink, '_blank', 'noopener')}
+                      >
+                        Open template
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <label>
+                Destination folder ID (optional)
+                <input
+                  type="text"
+                  placeholder="Drive folder for new documents"
+                  value={docsForm.folderId || ''}
+                  onChange={(event) => setDocsForm(prev => ({ ...prev, folderId: event.target.value }))}
+                  disabled={automationLoading.doc}
+                />
+              </label>
+              <div className="inline-field">
+                <span>Content format</span>
+                <div className="radio-group">
+                  <label>
+                    <input
+                      type="radio"
+                      name="docFormat"
+                      value="markdown"
+                      checked={docsForm.contentFormat === 'markdown'}
+                      onChange={(event) => setDocsForm(prev => ({ ...prev, contentFormat: event.target.value }))}
+                      disabled={automationLoading.doc}
+                    />
+                    Markdown
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="docFormat"
+                      value="plain"
+                      checked={docsForm.contentFormat === 'plain'}
+                      onChange={(event) => setDocsForm(prev => ({ ...prev, contentFormat: event.target.value }))}
+                      disabled={automationLoading.doc}
+                    />
+                    Plain text
+                  </label>
+                </div>
+              </div>
               <label>
                 Content (optional)
                 <textarea
-                  placeholder="Outline agenda, action items, or drafted notes…"
+                  placeholder="Outline agenda, action items, or drafted notes. Markdown headings and lists are supported."
                   value={docsForm.content}
                   onChange={(event) => setDocsForm(prev => ({ ...prev, content: event.target.value }))}
-                  rows={4}
+                  rows={10}
                   disabled={automationLoading.doc}
                 />
               </label>
               <button type="submit" disabled={automationLoading.doc}>
-                {automationLoading.doc ? 'Creating…' : 'Create Google Doc'}
+                {automationLoading.doc ? 'Creating...' : 'Create Google Doc'}
               </button>
             </form>
 
@@ -2144,17 +2467,50 @@ function App() {
                 <h3>Append Google Sheet rows</h3>
                 <p>Log product performance, outreach metrics, or pipeline updates for finance & ops.</p>
               </div>
-              <label>
-                Spreadsheet ID
-                <input
-                  type="text"
-                  placeholder="1A2B3C…"
-                  value={sheetsForm.spreadsheetId}
-                  onChange={(event) => setSheetsForm(prev => ({ ...prev, spreadsheetId: event.target.value }))}
-                  required
-                  disabled={automationLoading.sheet}
-                />
-              </label>
+              <div className="automation-subsection">
+                <label>
+                  Spreadsheet
+                  <select
+                    value={sheetsForm.spreadsheetId}
+                    onChange={(event) => setSheetsForm(prev => ({ ...prev, spreadsheetId: event.target.value }))}
+                    disabled={automationLoading.sheet || sheetCatalogLoading}
+                  >
+                    <option value="">Select spreadsheet...</option>
+                    {sheetCatalog.map((sheet) => (
+                      <option key={sheet.id} value={sheet.id}>
+                        {sheet.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="template-actions">
+                  <input
+                    type="text"
+                    placeholder="Spreadsheet folder ID (optional)"
+                    value={sheetCatalogFolderInput}
+                    onChange={(event) => setSheetCatalogFolderInput(event.target.value)}
+                    onBlur={() => setSheetCatalogFolderId(sheetCatalogFolderInput.trim())}
+                    disabled={automationLoading.sheet}
+                  />
+                  <div className="template-action-buttons">
+                    <button
+                      type="button"
+                      onClick={applySheetFolder}
+                      disabled={sheetCatalogLoading || automationLoading.sheet}
+                    >
+                      {sheetCatalogLoading ? 'Refreshing...' : 'Refresh sheets'}
+                    </button>
+                    {selectedSheet?.webViewLink && (
+                      <button
+                        type="button"
+                        onClick={() => window.open(selectedSheet.webViewLink, '_blank', 'noopener')}
+                      >
+                        Open sheet
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
               <label>
                 Range
                 <input
@@ -2166,19 +2522,64 @@ function App() {
                   disabled={automationLoading.sheet}
                 />
               </label>
+              <div className="inline-field">
+                <span>Input mode</span>
+                <div className="radio-group">
+                  <label>
+                    <input
+                      type="radio"
+                      name="sheetInputOption"
+                      value="USER_ENTERED"
+                      checked={sheetsForm.valueInputOption === 'USER_ENTERED'}
+                      onChange={(event) => setSheetsForm(prev => ({ ...prev, valueInputOption: event.target.value }))}
+                      disabled={automationLoading.sheet}
+                    />
+                    Respect Sheets formatting
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="sheetInputOption"
+                      value="RAW"
+                      checked={sheetsForm.valueInputOption === 'RAW'}
+                      onChange={(event) => setSheetsForm(prev => ({ ...prev, valueInputOption: event.target.value }))}
+                      disabled={automationLoading.sheet}
+                    />
+                    Raw values
+                  </label>
+                </div>
+              </div>
               <label>
-                Values (comma separated per line)
+                Values (CSV or paste from Sheets)
                 <textarea
                   placeholder={'Date, Product, Revenue\n2025-01-01, Luxury Watch, 12400'}
                   value={sheetsForm.valuesText}
                   onChange={(event) => setSheetsForm(prev => ({ ...prev, valuesText: event.target.value }))}
-                  rows={4}
+                  rows={6}
                   required
                   disabled={automationLoading.sheet}
                 />
               </label>
+              {sheetPreview.length > 0 && (
+                <div className="sheet-preview">
+                  <span className="form-hint">Preview ({sheetPreview.length} rows)</span>
+                  <div className="sheet-preview-table-wrapper">
+                    <table className="sheet-preview-table">
+                      <tbody>
+                        {sheetPreview.map((row, rowIndex) => (
+                          <tr key={`${rowIndex}-${row.join('|')}`}>
+                            {row.map((cell, cellIndex) => (
+                              <td key={cellIndex}>{cell || <span className="dimmed">(blank)</span>}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
               <button type="submit" disabled={automationLoading.sheet}>
-                {automationLoading.sheet ? 'Appending…' : 'Append rows'}
+                {automationLoading.sheet ? 'Appending...' : 'Append rows'}
               </button>
             </form>
 
@@ -2219,7 +2620,7 @@ function App() {
                 />
               </label>
               <button type="submit" disabled={automationLoading.reminder}>
-                {automationLoading.reminder ? 'Scheduling…' : 'Create calendar block'}
+                {automationLoading.reminder ? 'Scheduling...' : 'Create calendar block'}
               </button>
             </form>
           </div>
@@ -3751,6 +4152,11 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
 
 
 
