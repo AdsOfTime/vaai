@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import axios from 'axios';
 import './App.css';
 
-axios.defaults.baseURL = import.meta.env.VITE_API_BASE_URL || axios.defaults.baseURL;
+const CONFIGURED_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 function parseCsvText(text) {
   const rows = [];
@@ -263,7 +263,13 @@ function App() {
   const [subscriptionLoading, setSubscriptionLoading] = useState(false);
   const [subscriptionError, setSubscriptionError] = useState(null);
 
-  const baseApiUrl = axios.defaults.baseURL || '';
+  useEffect(() => {
+    if (CONFIGURED_API_BASE_URL) {
+      axios.defaults.baseURL = CONFIGURED_API_BASE_URL;
+    }
+  }, [CONFIGURED_API_BASE_URL]);
+
+  const baseApiUrl = CONFIGURED_API_BASE_URL || axios.defaults.baseURL || '';
   const workerBriefingsEnabled =
     import.meta.env.VITE_ENABLE_WORKER_BRIEFINGS === 'true';
   const briefingAvailable = useMemo(
