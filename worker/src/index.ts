@@ -387,7 +387,18 @@ const app = new Hono<{
 }>()
 
 app.use('*', cors({
-  origin: ['http://localhost:3002', 'http://localhost:3000', 'https://*.pages.dev'],
+  origin: (origin) => {
+    if (!origin) {
+      return ''
+    }
+    if (origin === 'http://localhost:3002' || origin === 'http://localhost:3000') {
+      return origin
+    }
+    if (origin.endsWith('.pages.dev')) {
+      return origin
+    }
+    return ''
+  },
   credentials: true
 }))
 
