@@ -160,6 +160,16 @@ CREATE TABLE IF NOT EXISTS meeting_briefs (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_briefs_unique ON meeting_briefs (team_id, owner_user_id, calendar_event_id);
 
+CREATE TABLE IF NOT EXISTS user_favorites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_favorites_user_id ON user_favorites (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_favorites_unique ON user_favorites (user_id, command);
+
 -- Seed helper categories
 INSERT OR IGNORE INTO email_categories (user_id, name, description, color)
 SELECT id, 'Work', 'Work-related emails', '#007bff' FROM users;

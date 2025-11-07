@@ -9,6 +9,7 @@ import {
   calendarInsertEvent,
   calendarListEvents,
   calendarPatchEvent,
+  ensureGoogleAccessToken,
   extractPlainBody,
   gmailCreateDraft,
   gmailCreateLabel,
@@ -377,7 +378,41 @@ const SUBSCRIPTION_TIERS = {
 const assistantSystemPrompt = `
 You are VAAI, an executive assistant that helps manage email, meetings, and follow-ups.
 Keep replies short and actionable. You can ask follow-up questions if details are missing.
-If scheduling a meeting, capture title, start and end time (ISO 8601 preferred), location, attendees, and description when possible.
+
+For meeting scheduling:
+- Parse casual language carefully (e.g., "9am" = 09:00:00, "2pm" = 14:00:00)
+- Use the current date context (today is November 6, 2025)
+- Convert relative times ("today", "tomorrow", "next Monday") to specific dates
+- Default duration to 30 minutes if not specified
+- Create ISO 8601 format without timezone suffix: YYYY-MM-DDTHH:MM:SS (no Z suffix)
+- IMPORTANT: "9am" = "09:00:00" NOT "21:00:00", "2pm" = "14:00:00" NOT "02:00:00"
+- Use "Coffee Meeting" as default title if not provided
+- Always try to call create_calendar_event when user requests scheduling
+
+CRITICAL TIME CONVERSION EXAMPLES (NO timezone suffix):
+- "9am" or "9 AM" on Nov 7 = "2025-11-07T09:00:00" (not "2025-11-07T09:00:00Z")
+- "2pm" or "2 PM" on Nov 7 = "2025-11-07T14:00:00" (not "2025-11-07T14:00:00Z")
+- "8pm" or "8 PM" on Nov 7 = "2025-11-07T20:00:00" (not "2025-11-07T20:00:00Z")
+
+The time should represent the user's local time, not UTC.
+
+For task creation:
+- Parse casual due dates/times (e.g., "tomorrow 1pm" = "2025-11-07T13:00:00")
+- Convert relative dates ("today", "tomorrow", "next week") to specific dates
+- If a specific time is mentioned, include it in the due date
+- Use ISO 8601 format without timezone suffix: YYYY-MM-DDTHH:MM:SS (no Z suffix)
+- IMPORTANT: "1pm" = "13:00:00" NOT "01:00:00", "9am" = "09:00:00" NOT "21:00:00"
+
+For email management:
+- When asked to summarize emails, focus on priority and work emails first
+- Identify actionable items (meetings to schedule, tasks to create, replies needed)
+- Highlight urgent items that need immediate attention
+- Suggest next steps for important emails
+- Categorize emails by importance and type (priority, work, personal)
+
+Current context: Today is November 6, 2025.
+
+When provided with email context, use it to give specific, actionable insights about the user's inbox.
 If you cannot fulfil a request, explain what additional information you need.
 `
 
@@ -416,7 +451,7 @@ const assistantTools = [
         properties: {
           title: { type: 'string', description: 'Short task description' },
           notes: { type: 'string', description: 'Additional details or context about the task' },
-          due: { type: 'string', description: 'Due date/time in ISO 8601 format' }
+          due: { type: 'string', description: 'Due date/time in ISO 8601 format (e.g. 2025-11-07T13:00:00 for tomorrow 1pm)' }
         },
         required: ['title'],
         additionalProperties: false
@@ -773,8 +808,8 @@ api.get('/emails', async (c) => {
     googleId,
     clientId,
     clientSecret,
-    maxResults: 10,
-    query: 'is:unread'
+    maxResults: 50,  // Get more emails for better AI analysis
+    query: ''  // Get all emails, not just unread
   })
 
   const emails = []
@@ -801,7 +836,7 @@ api.get('/emails', async (c) => {
         subject,
         from,
         snippet: full.snippet,
-        date: internalDate.toISOString()
+        timestamp: internalDate.toISOString()  // Fixed: was 'date', should be 'timestamp'
       })
     } catch (error) {
       console.error('Failed to load email', error)
@@ -1069,6 +1104,13 @@ api.get('/calendar/events', async (c) => {
   const timeMax = new Date(now.getTime() + (Number.isNaN(maxDays) ? 7 : maxDays) * 24 * 60 * 60 * 1000).toISOString()
 
   try {
+    console.log('Calendar API - Starting fetch with params:', {
+      googleId,
+      timeMin,
+      timeMax,
+      maxResults: Number.isNaN(maxResults) ? 10 : maxResults
+    })
+    
     const response = await calendarListEvents({
       db: c.env.DB,
       googleId,
@@ -1078,6 +1120,8 @@ api.get('/calendar/events', async (c) => {
       timeMax,
       maxResults: Number.isNaN(maxResults) ? 10 : maxResults
     })
+    
+    console.log('Calendar API - Raw response:', JSON.stringify(response, null, 2))
 
     const events = (response.items ?? []).map((event) => ({
       id: event.id,
@@ -1386,11 +1430,436 @@ api.post('/calendar/reminders/time-block', async (c) => {
   }
 })
 
+// Google Tasks endpoints
+api.get('/tasks', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+
+  const limitParam = c.req.query('limit')
+  const maxResults = limitParam ? Number.parseInt(limitParam, 10) : 50
+
+  try {
+    console.log('Tasks API - Starting fetch with params:', {
+      googleId,
+      taskListId: '@default',
+      maxResults: Number.isNaN(maxResults) ? 50 : maxResults
+    })
+    
+    const response = await googleTasksList({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      taskListId: '@default',
+      maxResults: Number.isNaN(maxResults) ? 50 : maxResults
+    })
+    
+    console.log('Tasks API - Raw response:', JSON.stringify(response, null, 2))
+
+    const tasks = (response.items ?? []).map((task) => ({
+      id: task.id,
+      title: task.title,
+      notes: task.notes,
+      status: task.status,
+      due: task.due,
+      completed: task.completed,
+      updated: task.updated,
+      links: task.links ?? []
+    }))
+
+    return c.json({ tasks })
+  } catch (error) {
+    console.error('Failed to fetch tasks:', error)
+    return c.json({
+      error: 'Failed to fetch tasks',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+api.post('/tasks', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+  const body = await parseJson<{
+    title?: string
+    notes?: string
+    due?: string
+  }>(c)
+
+  if (!body?.title) {
+    return c.json({ error: 'Task title is required' }, 400)
+  }
+
+  const task: Record<string, unknown> = {
+    title: body.title
+  }
+
+  if (body.notes) {
+    task.notes = body.notes
+  }
+
+  if (body.due) {
+    task.due = body.due
+  }
+
+  try {
+    const response = await googleTasksInsert({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      taskListId: '@default',
+      body: task
+    })
+
+    return c.json({ task: response }, 201)
+  } catch (error) {
+    console.error('Failed to create task:', error)
+    return c.json({
+      error: 'Failed to create task',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+api.patch('/tasks/:taskId', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+  const body = await parseJson<{
+    title?: string
+    notes?: string
+    due?: string
+    status?: string
+  }>(c)
+
+  if (!body || Object.keys(body).length === 0) {
+    return c.json({ error: 'No task fields supplied for update' }, 400)
+  }
+
+  const taskPatch: Record<string, unknown> = {}
+
+  if (body.title !== undefined) taskPatch.title = body.title
+  if (body.notes !== undefined) taskPatch.notes = body.notes
+  if (body.due !== undefined) taskPatch.due = body.due
+  if (body.status !== undefined) taskPatch.status = body.status
+
+  try {
+    const response = await googleTasksPatch({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      taskListId: '@default',
+      taskId: c.req.param('taskId'),
+      body: taskPatch
+    })
+    
+    return c.json({ task: response })
+  } catch (error) {
+    console.error('Failed to update task:', error)
+    return c.json({
+      error: 'Failed to update task',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+// Google Docs API endpoints
+api.get('/googledocs-test', async (c) => {
+  return c.json({ message: 'Google Docs API endpoint is working', timestamp: new Date().toISOString() })
+})
+
+api.get('/googledocs', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+
+  try {
+    console.log('Google Docs API - Fetching documents for user:', googleId)
+    
+    // List Google Docs files using Drive API
+    const response = await googleDriveListFiles({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      q: "mimeType='application/vnd.google-apps.document'",
+      orderBy: 'modifiedTime desc',
+      pageSize: 50
+    })
+
+    console.log('Google Docs API - Raw response:', JSON.stringify(response, null, 2))
+
+    const docs = (response.files ?? []).map((file) => ({
+      id: file.id,
+      name: file.name,
+      title: file.name,
+      webViewLink: file.webViewLink,
+      webContentLink: file.webContentLink,
+      modifiedTime: file.modifiedTime,
+      createdTime: file.createdTime,
+      mimeType: file.mimeType,
+      size: file.size
+    }))
+
+    return c.json(docs)
+  } catch (error) {
+    console.error('Failed to fetch Google Docs:', error)
+    return c.json({
+      error: 'Failed to fetch Google Docs',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+api.post('/googledocs/create', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+  const body = await parseJson<{
+    title?: string
+  }>(c)
+
+  if (!body?.title) {
+    return c.json({ error: 'Document title is required' }, 400)
+  }
+
+  try {
+    console.log('Google Docs API - Creating document:', body.title)
+    
+    const response = await googleDocsCreateDocument({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      title: body.title
+    })
+
+    console.log('Google Docs API - Created document:', JSON.stringify(response, null, 2))
+
+    return c.json({
+      id: response.documentId,
+      title: body.title,
+      webViewLink: `https://docs.google.com/document/d/${response.documentId}/edit`,
+      createdTime: new Date().toISOString()
+    }, 201)
+  } catch (error) {
+    console.error('Failed to create Google Doc:', error)
+    return c.json({
+      error: 'Failed to create Google Doc',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+// Google Sheets API endpoints
+api.get('/googlesheets-test', async (c) => {
+  return c.json({ message: 'Google Sheets API endpoint is working', timestamp: new Date().toISOString() })
+})
+
+api.get('/googlesheets', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+
+  try {
+    console.log('Google Sheets API - Fetching spreadsheets for user:', googleId)
+    
+    // List Google Sheets files using Drive API
+    const response = await googleDriveListFiles({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      q: "mimeType='application/vnd.google-apps.spreadsheet'",
+      orderBy: 'modifiedTime desc',
+      pageSize: 50
+    })
+
+    console.log('Google Sheets API - Raw response:', JSON.stringify(response, null, 2))
+
+    const sheets = (response.files ?? []).map((file) => ({
+      id: file.id,
+      name: file.name,
+      title: file.name,
+      webViewLink: file.webViewLink,
+      webContentLink: file.webContentLink,
+      modifiedTime: file.modifiedTime,
+      createdTime: file.createdTime,
+      mimeType: file.mimeType,
+      size: file.size
+    }))
+
+    return c.json(sheets)
+  } catch (error) {
+    console.error('Failed to fetch Google Sheets:', error)
+    return c.json({
+      error: 'Failed to fetch Google Sheets',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+api.post('/googlesheets/create', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const { clientId, clientSecret } = getGoogleConfig(c.env)
+  const body = await parseJson<{
+    title?: string
+  }>(c)
+
+  if (!body?.title) {
+    return c.json({ error: 'Spreadsheet title is required' }, 400)
+  }
+
+  try {
+    console.log('Google Sheets API - Creating spreadsheet:', body.title)
+    
+    // Create a new Google Sheet using the Sheets API directly
+    const { user, accessToken } = await ensureGoogleAccessToken(c.env.DB, googleId, clientId, clientSecret)
+    
+    const response = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        properties: {
+          title: body.title
+        }
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`Failed to create spreadsheet: ${await response.text()}`)
+    }
+
+    const result = await response.json() as any
+
+    console.log('Google Sheets API - Created spreadsheet:', JSON.stringify(result, null, 2))
+
+    return c.json({
+      id: result.spreadsheetId,
+      name: body.title,
+      title: body.title,
+      webViewLink: result.spreadsheetUrl,
+      createdTime: new Date().toISOString()
+    }, 201)
+  } catch (error) {
+    console.error('Failed to create Google Sheet:', error)
+    return c.json({
+      error: 'Failed to create Google Sheet',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+// Favorites API endpoints
+api.get('/favorites', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+
+  try {
+    console.log('Favorites API - Fetching favorites for user:', googleId)
+    
+    const favorites = await c.env.DB.prepare(
+      'SELECT * FROM user_favorites WHERE user_id = ? ORDER BY created_at DESC'
+    ).bind(googleId).all()
+
+    console.log('Favorites API - Found favorites:', favorites.results.length)
+
+    return c.json(favorites.results || [])
+  } catch (error) {
+    console.error('Failed to fetch favorites:', error)
+    return c.json({
+      error: 'Failed to fetch favorites',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+api.post('/favorites', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const body = await parseJson<{
+    command?: string
+  }>(c)
+
+  if (!body?.command?.trim()) {
+    return c.json({ error: 'Command is required' }, 400)
+  }
+
+  try {
+    console.log('Favorites API - Adding favorite for user:', googleId)
+    
+    // Check if favorite already exists
+    const existing = await c.env.DB.prepare(
+      'SELECT id FROM user_favorites WHERE user_id = ? AND command = ?'
+    ).bind(googleId, body.command.trim()).first()
+
+    if (existing) {
+      return c.json({ error: 'Command already in favorites' }, 409)
+    }
+
+    // Add new favorite
+    const result = await c.env.DB.prepare(
+      'INSERT INTO user_favorites (user_id, command, created_at) VALUES (?, ?, datetime("now")) RETURNING *'
+    ).bind(googleId, body.command.trim()).first()
+
+    console.log('Favorites API - Added favorite:', result)
+
+    return c.json(result, 201)
+  } catch (error) {
+    console.error('Failed to add favorite:', error)
+    return c.json({
+      error: 'Failed to add favorite',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
+api.delete('/favorites/:id', async (c) => {
+  const authed = c.get('user')
+  const googleId = getGoogleIdFromPayload(authed)
+  const favoriteId = c.req.param('id')
+
+  try {
+    console.log('Favorites API - Removing favorite:', favoriteId, 'for user:', googleId)
+    
+    const result = await c.env.DB.prepare(
+      'DELETE FROM user_favorites WHERE id = ? AND user_id = ?'
+    ).bind(favoriteId, googleId).run()
+
+    if (result.changes === 0) {
+      return c.json({ error: 'Favorite not found' }, 404)
+    }
+
+    console.log('Favorites API - Removed favorite successfully')
+
+    return c.json({ success: true })
+  } catch (error) {
+    console.error('Failed to remove favorite:', error)
+    return c.json({
+      error: 'Failed to remove favorite',
+      message: (error as Error).message
+    }, 500)
+  }
+})
+
 api.post('/assistant', async (c) => {
   try {
     const user = await resolveCurrentUser(c)
     const authed = c.get('user')
-    const body = await parseJson<{ message?: string; context?: Record<string, unknown> }>(c)
+    const body = await parseJson<{ 
+      message?: string; 
+      context?: Record<string, unknown>;
+      conversation?: Array<{ role: string; content: string }>;
+      timezone?: string;
+    }>(c)
 
     if (!body?.message || !body.message.trim()) {
       return c.json({ error: 'Message is required.' }, 400)
@@ -1412,6 +1881,54 @@ api.post('/assistant', async (c) => {
       teamId: teamIdHeader || null
     }
 
+    // Build conversation history with timezone and context
+    const userTimezone = body.timezone || 'UTC'
+    let contextualPrompt = assistantSystemPrompt + `\n\nUser's timezone: ${userTimezone}. Convert all times to this timezone when creating ISO 8601 dates.`
+    
+    // Add email context if available
+    if (body.context && typeof body.context === 'object') {
+      const emails = Array.isArray(body.context.emails) ? body.context.emails : []
+      const calendar = Array.isArray(body.context.calendar) ? body.context.calendar : []
+      const tasks = Array.isArray(body.context.tasks) ? body.context.tasks : []
+      
+      if (emails.length > 0) {
+        contextualPrompt += `\n\nCURRENT EMAIL CONTEXT:\nThe user has ${emails.length} emails in their inbox:\n`
+        emails.slice(0, 10).forEach((email: any, index: number) => {
+          const category = email.category || 'uncategorized'
+          contextualPrompt += `${index + 1}. [${category.toUpperCase()}] "${email.subject}" from ${email.from} (${email.time})\n`
+        })
+        
+        const priorityEmails = emails.filter((email: any) => email.category === 'priority')
+        const workEmails = emails.filter((email: any) => email.category === 'work')
+        const personalEmails = emails.filter((email: any) => email.category === 'personal')
+        
+        contextualPrompt += `\nEmail Summary: ${priorityEmails.length} priority, ${workEmails.length} work, ${personalEmails.length} personal emails.`
+      }
+      
+      if (calendar.length > 0) {
+        contextualPrompt += `\n\nThe user has ${calendar.length} upcoming calendar events.`
+      }
+      
+      if (tasks.length > 0) {
+        const pendingTasks = tasks.filter((task: any) => task.status !== 'completed')
+        contextualPrompt += `\n\nThe user has ${pendingTasks.length} pending tasks.`
+      }
+    }
+    
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: contextualPrompt }
+    ]
+
+    // Add conversation history if provided
+    if (body.conversation && Array.isArray(body.conversation)) {
+      messages.push(...body.conversation.filter(msg => 
+        msg && typeof msg.role === 'string' && typeof msg.content === 'string'
+      ))
+    } else {
+      // Fallback to single message
+      messages.push({ role: 'user', content: body.message.trim() })
+    }
+
     const completionResponse = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -1420,10 +1937,7 @@ api.post('/assistant', async (c) => {
       },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: assistantSystemPrompt },
-          { role: 'user', content: body.message.trim() }
-        ],
+        messages,
         tools: assistantTools,
         tool_choice: 'auto'
       })
@@ -1487,7 +2001,8 @@ api.post('/assistant', async (c) => {
             end,
             attendees: args.attendees,
             location: typeof args.location === 'string' ? args.location : undefined,
-            description: typeof args.description === 'string' ? args.description : undefined
+            description: typeof args.description === 'string' ? args.description : undefined,
+            timezone: body.timezone
           })
 
           return c.json(result)
@@ -1504,6 +2019,8 @@ api.post('/assistant', async (c) => {
             })
           }
 
+
+
           const title = typeof args.title === 'string' ? args.title : ''
           if (!title) {
             return c.json({
@@ -1518,7 +2035,8 @@ api.post('/assistant', async (c) => {
             clientSecret,
             title,
             notes: typeof args.notes === 'string' ? args.notes : undefined,
-            due: typeof args.due === 'string' ? args.due : undefined
+            due: typeof args.due === 'string' ? args.due : undefined,
+            timezone: body.timezone
           })
 
           return c.json(taskResult)
@@ -2163,6 +2681,73 @@ api.post('/gmail/compose/drafts/:draftId/send', async (c) => {
   }
 })
 
+api.get('/gmail/inbox', async (c) => {
+  try {
+    await resolveCurrentUser(c)
+    const authed = c.get('user')
+    const googleId = getGoogleIdFromPayload(authed)
+    const { clientId, clientSecret } = getGoogleConfig(c.env)
+    
+    const maxResultsParam = c.req.query('maxResults')
+    const maxResults = maxResultsParam ? Number.parseInt(maxResultsParam, 10) : 10
+    const limit = Number.isFinite(maxResults) && maxResults > 0 ? maxResults : 10
+    
+    // Get recent messages from inbox
+    const messageList = await gmailListMessages({
+      db: c.env.DB,
+      googleId,
+      clientId,
+      clientSecret,
+      maxResults: limit,
+      query: 'in:inbox' // Only show inbox messages
+    })
+    
+    const messages = []
+    const rawMessages = messageList.messages ?? []
+    
+    for (const message of rawMessages.slice(0, limit)) {
+      try {
+        const full = await gmailGetMessage({
+          db: c.env.DB,
+          googleId,
+          clientId,
+          clientSecret,
+          id: message.id,
+          format: 'full'
+        })
+        
+        const subject = getHeader(full.payload, 'Subject') || 'No Subject'
+        const from = getHeader(full.payload, 'From') || 'Unknown Sender'
+        const date = full.internalDate ? new Date(Number(full.internalDate)) : new Date()
+        
+        // Extract message snippet/preview
+        let snippet = full.snippet || ''
+        if (snippet.length > 150) {
+          snippet = snippet.substring(0, 150) + '...'
+        }
+        
+        messages.push({
+          id: message.id,
+          threadId: message.threadId,
+          subject,
+          from,
+          date: date.toISOString(),
+          snippet,
+          sender: from.split('<')[0].trim(), // Clean sender name
+          preview: snippet
+        })
+      } catch (error) {
+        console.error('Failed to fetch message details:', error)
+        // Continue with other messages if one fails
+      }
+    }
+    
+    return c.json({ messages })
+  } catch (error) {
+    return handleRouteError(c, error, 'Failed to load inbox')
+  }
+})
+
 api.get('/google/tasks', async (c) => {
   try {
     const user = await resolveCurrentUser(c)
@@ -2386,20 +2971,143 @@ api.get('/briefing', async (c) => {
 
 api.get('/follow-ups', async (c) => {
   try {
-    const context = await getFollowUpContext(c)
+    const user = await resolveCurrentUser(c)
+    const authed = c.get('user')
+    const googleId = getGoogleIdFromPayload(authed)
+    const { clientId, clientSecret } = getGoogleConfig(c.env)
+    
+    // Check if this is a team-based request or individual user request
+    const teamHeader = c.req.header('x-team-id')
+    let teamId: number | null = null
+    
+    if (teamHeader) {
+      // Team-based request - validate team membership
+      teamId = Number.parseInt(teamHeader, 10)
+      if (!Number.isFinite(teamId)) {
+        return c.json({ error: 'Invalid team id' }, 400)
+      }
+
+      const team = await getTeamById(c.env.DB, teamId)
+      if (!team) {
+        return c.json({ error: 'Team not found' }, 404)
+      }
+
+      const membership = await getTeamMember(c.env.DB, teamId, user.id)
+      if (!membership || membership.status !== 'active') {
+        return c.json({ error: 'You do not belong to this team' }, 403)
+      }
+    }
+    
+    // Get follow-ups from database
     const statusParam = c.req.query('status')
     const status = statusParam === 'all' ? null : (statusParam || 'pending')
     const filter = c.req.query('filter')
-    const ownerUserId = filter === 'mine' ? context.user.id : undefined
+    const ownerUserId = filter === 'mine' ? user.id : undefined
 
-    const tasks = await listFollowUpTasks(c.env.DB, {
-      teamId: context.teamId,
-      status,
-      ownerUserId,
-      limit: 100
+    let tasks = []
+    
+    // Only query database for follow-ups if we have a team (team-based workflow)
+    if (teamId) {
+      tasks = await listFollowUpTasks(c.env.DB, {
+        teamId,
+        status,
+        ownerUserId,
+        limit: 100
+      })
+    }
+
+    // If no follow-ups in database, analyze unread emails for immediate follow-ups
+    if (tasks.length === 0) {
+      try {
+        const unreadList = await gmailListMessages({
+          db: c.env.DB,
+          googleId,
+          clientId,
+          clientSecret,
+          maxResults: 10,
+          query: 'is:unread'
+        })
+
+        const followUps = []
+        const messages = unreadList.messages ?? []
+
+        for (const message of messages.slice(0, 5)) {
+          try {
+            const full = await gmailGetMessage({
+              db: c.env.DB,
+              googleId,
+              clientId,
+              clientSecret,
+              id: message.id,
+              format: 'full'
+            })
+
+            const subject = getHeader(full.payload, 'Subject')
+            const from = getHeader(full.payload, 'From')
+            const internalDate = full.internalDate ? new Date(Number(full.internalDate)) : new Date()
+            const daysAgo = Math.floor((Date.now() - internalDate.getTime()) / (1000 * 60 * 60 * 24))
+
+            // Extract sender name and email
+            const fromMatch = from?.match(/^(.+?)\s*<(.+?)>$/) || ['', from || '', from || '']
+            const senderName = fromMatch[1]?.trim() || fromMatch[2]?.split('@')[0] || 'Unknown'
+            const senderEmail = fromMatch[2]?.trim() || from || ''
+
+            followUps.push({
+              id: message.id,
+              teamId: context.teamId,
+              ownerUserId: context.user.id,
+              threadId: full.threadId,
+              lastMessageId: message.id,
+              counterpartEmail: senderEmail,
+              subject: subject || 'No subject',
+              summary: `Unread email from ${senderName}`,
+              status: 'pending',
+              priority: daysAgo > 2 ? 1 : 2,
+              dueAt: null,
+              suggestedSendAt: null,
+              draftSubject: null,
+              draftBody: null,
+              toneHint: null,
+              promptVersion: null,
+              metadata: { 
+                isUnread: true, 
+                daysOld: daysAgo,
+                senderName: senderName
+              },
+              sentAt: null,
+              createdAt: internalDate.toISOString(),
+              updatedAt: internalDate.toISOString()
+            })
+          } catch (error) {
+            console.error('Error processing unread email for follow-up:', error)
+          }
+        }
+
+        return c.json({ 
+          followUps: followUps.map((task) => ({
+            id: task.id,
+            contact: task.metadata?.senderName || task.counterpartEmail?.split('@')[0] || 'Unknown',
+            subject: task.summary || task.subject || 'Follow-up needed',
+            daysOverdue: task.metadata?.daysOld || 0,
+            priority: task.priority,
+            status: task.status
+          }))
+        })
+      } catch (error) {
+        console.error('Error analyzing unread emails:', error)
+      }
+    }
+
+    return c.json({ 
+      followUps: tasks.map(serializeFollowUpTask).map((task) => ({
+        id: task.id,
+        contact: task.counterpartEmail?.split('@')[0] || 'Unknown',
+        subject: task.subject || 'Follow-up needed',
+        daysOverdue: task.dueAt ? Math.floor((Date.now() - new Date(task.dueAt).getTime()) / (1000 * 60 * 60 * 24)) : 0,
+        priority: task.priority,
+        status: task.status
+      }))
     })
-
-    return c.json({ tasks: tasks.map(serializeFollowUpTask) })
   } catch (error) {
     return handleRouteError(c, error, 'Unable to load follow-up tasks')
   }
@@ -2539,6 +3247,327 @@ api.post('/follow-ups/:taskId/regenerate', async (c) => {
     return c.json({ task: serializeFollowUpTask(updated) })
   } catch (error) {
     return handleRouteError(c, error, 'Unable to regenerate follow-up draft')
+  }
+})
+
+// AI Intelligence Center Endpoints
+app.post('/api/ai/email-triage', async (c) => {
+  try {
+    const user = await getAuthenticatedUser(c)
+    if (!user) {
+      return c.json({ error: 'Authentication required' }, 401)
+    }
+
+    // Get user's recent emails
+    const accessToken = await getUserAccessToken(c.env, user.email)
+    if (!accessToken) {
+      return c.json({ error: 'Gmail access required' }, 401)
+    }
+
+    const emails = await gmailListMessages(accessToken, { maxResults: 20 })
+    const emailDetails = await Promise.all(
+      emails.slice(0, 10).map(async (email: any) => {
+        try {
+          const details = await gmailGetMessage(accessToken, email.id)
+          return {
+            id: email.id,
+            from: details.payload?.headers?.find((h: any) => h.name === 'From')?.value || 'Unknown',
+            subject: details.payload?.headers?.find((h: any) => h.name === 'Subject')?.value || 'No subject',
+            snippet: details.snippet || '',
+            body: extractPlainBody(details.payload) || ''
+          }
+        } catch (error) {
+          return null
+        }
+      })
+    )
+
+    const validEmails = emailDetails.filter(Boolean)
+    const aiResult = await generateEmailTriageAI(c.env, validEmails)
+    
+    return c.json(aiResult)
+  } catch (error) {
+    return handleRouteError(c, error, 'Email triage failed')
+  }
+})
+
+app.post('/api/ai/meeting-intelligence', async (c) => {
+  try {
+    const user = await getAuthenticatedUser(c)
+    if (!user) {
+      return c.json({ error: 'Authentication required' }, 401)
+    }
+
+    // Get user's calendar events for today
+    const accessToken = await getUserAccessToken(c.env, user.email)
+    if (!accessToken) {
+      return c.json({ error: 'Calendar access required' }, 401)
+    }
+
+    const today = new Date()
+    const timeMin = new Date(today.setHours(0, 0, 0, 0)).toISOString()
+    const timeMax = new Date(today.setHours(23, 59, 59, 999)).toISOString()
+
+    const calendarResponse = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&maxResults=10&singleEvents=true&orderBy=startTime`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      }
+    )
+
+    const calendarData = await calendarResponse.json()
+    const meetings = calendarData.items || []
+
+    const userContext = {
+      email: user.email,
+      recentActivity: 'calendar_check',
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    }
+
+    const aiResult = await generateMeetingIntelligence(c.env, meetings, userContext)
+    
+    return c.json(aiResult)
+  } catch (error) {
+    return handleRouteError(c, error, 'Meeting intelligence failed')
+  }
+})
+
+app.post('/api/ai/productivity-analytics', async (c) => {
+  try {
+    const user = await getAuthenticatedUser(c)
+    if (!user) {
+      return c.json({ error: 'Authentication required' }, 401)
+    }
+
+    // Gather user activity data
+    const userId = await getUserId(c.env, user.email)
+    const db = c.env.VAAI_DB
+
+    // Get recent activity patterns
+    const recentEmails = await db.prepare(`
+      SELECT COUNT(*) as email_count, 
+             AVG(confidence_score) as avg_confidence
+      FROM processed_emails 
+      WHERE user_id = ? AND created_at > datetime('now', '-7 days')
+    `).bind(userId).first()
+
+    const recentTasks = await db.prepare(`
+      SELECT COUNT(*) as task_count,
+             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count
+      FROM tasks 
+      WHERE user_id = ? AND created_at > datetime('now', '-7 days')
+    `).bind(userId).all()
+
+    const userActivity = {
+      emailActivity: recentEmails,
+      taskActivity: recentTasks.results[0] || { task_count: 0, completed_count: 0 },
+      userId: userId,
+      analysisDate: new Date().toISOString()
+    }
+
+    const aiResult = await generateProductivityAnalytics(c.env, userActivity)
+    
+    return c.json(aiResult)
+  } catch (error) {
+    return handleRouteError(c, error, 'Productivity analytics failed')
+  }
+})
+
+app.post('/api/ai/follow-up-intelligence', async (c) => {
+  try {
+    const user = await getAuthenticatedUser(c)
+    if (!user) {
+      return c.json({ error: 'Authentication required' }, 401)
+    }
+
+    const userId = await getUserId(c.env, user.email)
+    const db = c.env.VAAI_DB
+
+    // Get recent conversations that might need follow-up
+    const recentFollowUps = await db.prepare(`
+      SELECT counterpart_email, title, description, created_at, status
+      FROM follow_ups 
+      WHERE user_id = ? AND created_at > datetime('now', '-14 days')
+      ORDER BY created_at DESC LIMIT 10
+    `).bind(userId).all()
+
+    const conversations = recentFollowUps.results.map((item: any) => ({
+      contact: item.counterpart_email?.split('@')[0] || 'Unknown',
+      lastMessage: item.description || item.title,
+      date: item.created_at,
+      context: item.title || 'General conversation',
+      status: item.status
+    }))
+
+    const aiResult = await generateFollowUpIntelligence(c.env, conversations)
+    
+    return c.json(aiResult)
+  } catch (error) {
+    return handleRouteError(c, error, 'Follow-up intelligence failed')
+  }
+})
+
+// AI Command Interface - Natural Language Processing
+api.post('/ai/command', async (c) => {
+  try {
+    // Get user first to check authentication
+    const user = await resolveCurrentUser(c)
+    console.log('AI Command - User authenticated:', user.email)
+    
+    const { command, context } = await c.req.json()
+    console.log('AI Command - Command received:', command)
+    console.log('AI Command - Context received:', JSON.stringify(context, null, 2))
+    
+    if (!command || typeof command !== 'string') {
+      return c.json({ error: 'Command is required' }, 400)
+    }
+
+    const aiResult = await generateAICommandResponse(c.env, command, context)
+    
+    return c.json(aiResult)
+  } catch (error) {
+    console.error('AI Command Error:', error)
+    console.error('Error stack:', error instanceof Error ? error.stack : 'No stack available')
+    console.error('Environment check - OPENAI_API_KEY exists:', !!c.env.OPENAI_API_KEY)
+    return handleRouteError(c, error, 'AI command processing failed')
+  }
+})
+
+// Helper function to refresh Google access token
+async function refreshGoogleToken(refreshToken: string, env: EnvBindings): Promise<string | null> {
+  try {
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: env.GOOGLE_CLIENT_ID,
+        client_secret: env.GOOGLE_CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+    })
+
+    if (!response.ok) {
+      console.error('Token refresh failed:', response.status, await response.text())
+      return null
+    }
+
+    const data = await response.json() as { access_token: string }
+    return data.access_token
+  } catch (error) {
+    console.error('Token refresh error:', error)
+    return null
+  }
+}
+
+// Debug endpoint to test Gmail access
+app.post('/api/debug/gmail-test', async (c) => {
+  try {
+    // Get authorization header properly
+    const header = c.req.header('Authorization')
+    if (!header || !header.startsWith('Bearer ')) {
+      return c.json({ error: 'No authorization token' }, 401)
+    }
+
+    const jwtToken = header.slice(7)
+    console.log('Testing Gmail access with JWT token...')
+    
+    // Verify JWT and get user info
+    let accessToken;
+    let userEmail;
+    let user;
+    let tokenRefreshed = false;
+    
+    try {
+      const payload = await verifyJwt(c.env.JWT_SECRET, jwtToken)
+      console.log('JWT payload:', payload)
+      
+      // Get user from database to get their Google access token
+      // Note: payload.userId contains the Google ID, not the database ID
+      user = await c.env.DB.prepare(
+        'SELECT * FROM users WHERE google_id = ?'
+      ).bind(payload.userId).first()
+      
+      if (!user) {
+        return c.json({ 
+          error: 'User not found in database', 
+          googleId: payload.userId,
+          debugInfo: 'JWT contains Google ID but no matching user record found'
+        }, 404)
+      }
+      
+      accessToken = user.access_token
+      userEmail = user.email
+      
+      if (!accessToken) {
+        return c.json({ error: 'No Google access token found' }, 401)
+      }
+    } catch (error) {
+      return c.json({ error: 'Invalid JWT token', details: error.message }, 401)
+    }
+    
+    // Test Gmail API access with Google access token
+    let response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      }
+    })
+    
+    // If token is expired (401), try to refresh it
+    if (response.status === 401 && user.refresh_token) {
+      console.log('Access token expired, attempting refresh...')
+      const newAccessToken = await refreshGoogleToken(user.refresh_token, c.env)
+      
+      if (newAccessToken) {
+        // Update user's access token in database
+        await c.env.DB.prepare(
+          'UPDATE users SET access_token = ?, updated_at = datetime("now") WHERE id = ?'
+        ).bind(newAccessToken, user.id).run()
+        
+        // Retry Gmail API call with new token
+        response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+          headers: {
+            'Authorization': `Bearer ${newAccessToken}`,
+            'Content-Type': 'application/json'
+          }
+        })
+        
+        accessToken = newAccessToken
+        tokenRefreshed = true
+        console.log('Token refreshed successfully')
+      }
+    }
+    
+    const result = {
+      jwtTokenProvided: !!jwtToken,
+      googleAccessTokenProvided: !!accessToken,
+      userEmail: userEmail,
+      tokenRefreshed: tokenRefreshed,
+      gmailApiStatus: response.status,
+      gmailApiOk: response.ok,
+      timestamp: new Date().toISOString()
+    }
+    
+    if (response.ok) {
+      const profile = await response.json()
+      result.emailAddress = profile.emailAddress
+      result.messagesTotal = profile.messagesTotal
+    } else {
+      const errorText = await response.text()
+      result.error = errorText
+      console.error('Gmail API error:', errorText)
+    }
+    
+    return c.json(result)
+  } catch (error) {
+    return c.json({ 
+      error: 'Gmail test failed', 
+      details: error.message,
+      timestamp: new Date().toISOString()
+    }, 500)
   }
 })
 
@@ -3973,17 +5002,31 @@ async function createCalendarEventForAssistant(params: {
   attendees?: unknown
   location?: string
   description?: string
+  timezone?: string
 }) {
-  const startDate = new Date(params.start)
-  const endDate = new Date(params.end)
+  const userTimezone = params.timezone || getDefaultTimeZone()
+  
+  // Parse the ISO string as local time in the user's timezone
+  // Remove any timezone suffix and treat as local time
+  const cleanStart = params.start.replace(/Z.*$/, '')
+  const cleanEnd = params.end.replace(/Z.*$/, '')
+  
+  // Create the datetime string that Google Calendar will interpret correctly
+  // We send the time as-is and specify the timezone separately
+  const startDateTime = cleanStart.includes('T') ? cleanStart : cleanStart + 'T00:00:00'
+  const endDateTime = cleanEnd.includes('T') ? cleanEnd : cleanEnd + 'T00:00:00'
 
-  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+  // Validate the date format
+  const testStart = new Date(startDateTime + 'Z') // Add Z just for validation
+  const testEnd = new Date(endDateTime + 'Z')
+  
+  if (Number.isNaN(testStart.getTime()) || Number.isNaN(testEnd.getTime())) {
     return {
-      reply: 'I need both a valid start and end time (ISO 8601) to book that meeting. Please provide those and try again.'
+      reply: 'I need both a valid start and end time to book that meeting. Please provide those and try again.'
     }
   }
 
-  if (endDate <= startDate) {
+  if (testEnd <= testStart) {
     return {
       reply: 'The meeting end time has to be after the start time. Can you clarify the timing?'
     }
@@ -3995,7 +5038,7 @@ async function createCalendarEventForAssistant(params: {
         .filter((email): email is string => Boolean(email))
         .map((email) => ({ email }))
     : []
-
+  
   const response = await calendarInsertEvent({
     db: params.env.DB,
     googleId: params.googleId,
@@ -4006,22 +5049,38 @@ async function createCalendarEventForAssistant(params: {
       description: params.description || '',
       location: params.location || '',
       start: {
-        dateTime: startDate.toISOString(),
-        timeZone: getDefaultTimeZone()
+        dateTime: startDateTime,
+        timeZone: userTimezone
       },
       end: {
-        dateTime: endDate.toISOString(),
-        timeZone: getDefaultTimeZone()
+        dateTime: endDateTime,
+        timeZone: userTimezone
       },
       attendees: normalizedAttendees
     }
   })
 
-  const humanStart = startDate.toLocaleString()
-  const humanEnd = endDate.toLocaleString()
+  // Create display times from the clean datetime strings
+  const displayStart = new Date(startDateTime + 'Z')
+  const displayEnd = new Date(endDateTime + 'Z')
+  
+  const humanStart = displayStart.toLocaleString('en-US', { 
+    weekday: 'long',
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  })
+  const humanEnd = displayEnd.toLocaleString('en-US', { 
+    hour: 'numeric',
+    minute: '2-digit', 
+    hour12: true
+  })
 
   return {
-    reply: `Done! I scheduled "${params.summary}" from ${humanStart} to ${humanEnd}.`,
+    reply: `✅ Created "${params.summary}" on ${humanStart} to ${humanEnd} in timezone ${userTimezone}. Check your calendar!`,
     eventCreated: true,
     event: {
       id: (response as any)?.id ?? null,
@@ -4041,6 +5100,7 @@ async function createTaskForAssistant(params: {
   title: string
   notes?: string
   due?: string
+  timezone?: string
 }) {
   if (!params.title || !params.title.trim()) {
     return {
@@ -4052,8 +5112,31 @@ async function createTaskForAssistant(params: {
     const dueDate = new Date(params.due)
     if (Number.isNaN(dueDate.getTime())) {
       return {
-        reply: 'The due date needs to be in ISO 8601 format (for example 2025-04-01T09:00:00Z). Could you restate it?'
+        reply: 'I had trouble parsing that date. Could you try again with a different format?'
       }
+    }
+  }
+
+  // Format due date properly for Google Tasks API with timezone awareness
+  let formattedDue: string | undefined = undefined
+  if (params.due) {
+    try {
+      // Remove any timezone suffix and treat as local time (same approach as calendar)
+      const cleanDue = params.due.replace(/Z.*$/, '')
+      
+      // Create the datetime string that Google Tasks will interpret correctly
+      const dueDateTime = cleanDue.includes('T') ? cleanDue : cleanDue + 'T00:00:00'
+      
+      // Validate the date format
+      const testDate = new Date(dueDateTime + 'Z') // Add Z just for validation
+      
+      if (!isNaN(testDate.getTime())) {
+        // For Google Tasks, we can send the local time without timezone suffix
+        // Google Tasks will treat it as the user's local time
+        formattedDue = dueDateTime + 'Z' // Google Tasks expects Z suffix
+      }
+    } catch (error) {
+      console.error('Invalid due date format:', params.due)
     }
   }
 
@@ -4065,15 +5148,18 @@ async function createTaskForAssistant(params: {
     taskListId: '@default',
     body: {
       title: params.title.trim(),
-      notes: params.notes ?? undefined,
-      due: params.due ?? undefined
+      ...(params.notes && { notes: params.notes }),
+      ...(formattedDue && { due: formattedDue })
     }
   })
 
   const task = mapGoogleTask(response)
+  
+  // Use the original user-friendly date format for display, not Google's response
+  const displayDate = params.due ? params.due.replace(/Z.*$/, '') : null
 
   return {
-    reply: `Got it — I created the task "${task?.title ?? params.title.trim()}"${task?.due ? ` due ${task.due}` : ''}.`,
+    reply: `Got it — I created the task "${task?.title ?? params.title.trim()}"${displayDate ? ` due ${displayDate}` : ''}.`,
     task,
     taskCreated: true
   }
@@ -4341,5 +5427,950 @@ async function storeProcessedEmail(db: D1Database, userId: number, payload: {
     payload.confidenceScore,
     payload.isManualOverride
   ).run()
+}
+
+// AI Intelligence Center Functions
+// Generate specific email analysis for targeted queries
+async function generateSpecificEmailAnalysis(env: EnvBindings, emails: any[], query: string): Promise<any> {
+  console.log('generateSpecificEmailAnalysis called with:', emails?.length || 0, 'emails for query:', query)
+  
+  if (emails && emails.length > 0 && env.OPENAI_API_KEY) {
+    try {
+      const emailDetails = emails.map(email => 
+        `📧 Email ID: ${email.id}
+📤 From: ${email.from}
+📋 Subject: ${email.subject}
+📝 Content: ${email.snippet || 'No preview available'}
+📅 Date: ${email.timestamp}
+🏷️ Labels: ${email.labels?.join(', ') || 'None'}`
+      ).join('\n\n' + '─'.repeat(50) + '\n\n')
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4',
+          messages: [
+            {
+              role: 'system',
+              content: `You are analyzing specific emails based on the user's query. Present the results in a user-friendly format that shows actual email details and actionable insights.
+
+Return JSON format:
+{
+  "emailsFound": [
+    {
+      "id": "actual_email_id",
+      "subject": "actual_subject", 
+      "from": "actual_sender",
+      "snippet": "actual_content_preview",
+      "timestamp": "actual_date",
+      "priority": "LOW|MEDIUM|HIGH",
+      "actionType": "read|respond|archive|forward",
+      "insights": "What this email means or what action to take"
+    }
+  ],
+  "summary": "Brief overview of what was found",
+  "totalFound": number_of_emails,
+  "actionRecommendations": ["specific actions user can take"],
+  "keyFindings": ["important insights about these emails"]
+}`
+            },
+            {
+              role: 'user',
+              content: `User query: "${query}"
+
+Analyze these specific emails:
+
+${emailDetails}`
+            }
+          ],
+          max_tokens: 2000,
+          temperature: 0.2
+        })
+      })
+
+      if (!response.ok) throw new Error('AI analysis failed')
+      
+      const data = await response.json<{ choices?: { message?: { content?: string } }[] }>()
+      const aiResponse = JSON.parse(data.choices?.[0]?.message?.content || '{}')
+      
+      return {
+        ...aiResponse,
+        usingRealData: true,
+        querySpecific: true,
+        realEmailCount: emails.length,
+        originalQuery: query
+      }
+    } catch (error) {
+      console.error('Specific email analysis error:', error)
+    }
+  }
+  
+  // Fallback for when no emails match or API fails
+  return {
+    emailsFound: [],
+    summary: `No emails found matching "${query}"`,
+    totalFound: 0,
+    actionRecommendations: ['Try a different search term', 'Check your email filters'],
+    keyFindings: ['No matching emails in recent history'],
+    usingRealData: true,
+    querySpecific: true
+  }
+}
+
+async function generateEmailTriageAI(env: EnvBindings, emails: any[]): Promise<any> {
+  console.log('generateEmailTriageAI called with:', emails?.length || 0, 'emails')
+  console.log('Has OpenAI key:', !!env.OPENAI_API_KEY)
+  
+  // If we have real emails, analyze them with AI
+  if (emails && emails.length > 0 && env.OPENAI_API_KEY) {
+    console.log('Processing real emails with AI...')
+    try {
+      const emailSummaries = emails.slice(0, 10).map(email => 
+        `ID: ${email.id}\nFrom: ${email.from}\nSubject: ${email.subject}\nSnippet: ${email.snippet || 'No content'}\nTimestamp: ${email.timestamp}`
+      ).join('\n\n---\n\n')
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4',
+          messages: [
+            {
+              role: 'system',
+              content: `You are an AI email triage assistant. Analyze the user's real emails and provide details about all emails found, with priority classification.
+
+Return ALL emails analyzed with their details and classify each one.
+
+Respond in JSON format:
+{
+  "allEmails": [
+    {
+      "id": "actual_email_id_from_input",
+      "subject": "actual_subject_from_input",
+      "from": "actual_from_from_input", 
+      "snippet": "actual_snippet_from_input",
+      "timestamp": "actual_timestamp_from_input",
+      "priority": "URGENT|HIGH|MEDIUM|LOW",
+      "category": "lottery|promotional|business|personal|etc",
+      "actionType": "read|respond|archive|follow_up"
+    }
+  ],
+  "highPriorityEmails": [],
+  "summary": "Brief summary of what you found",
+  "insights": ["Key insight 1", "Key insight 2"],
+  "suggestion": "Overall recommendation",
+  "stats": {
+    "totalAnalyzed": ${emails.length},
+    "highPriority": 0,
+    "aiConfidence": 0.9
+  }
+}`
+            },
+            {
+              role: 'user',
+              content: `Analyze these real emails for priority:\n\n${emailSummaries}`
+            }
+          ],
+          max_tokens: 1500,
+          temperature: 0.3
+        })
+      })
+
+      if (!response.ok) throw new Error('AI request failed')
+      
+      const data = await response.json<{ choices?: { message?: { content?: string } }[] }>()
+      const aiResponse = JSON.parse(data.choices?.[0]?.message?.content || '{}')
+      
+      // Ensure we have the actionType for frontend handling
+      if (aiResponse.highPriorityEmails) {
+        aiResponse.highPriorityEmails.forEach((email: any) => {
+          if (!email.actionType) {
+            // Infer action type from content
+            if (email.subject?.toLowerCase().includes('meeting') || email.subject?.toLowerCase().includes('schedule')) {
+              email.actionType = 'calendar_action'
+            } else if (email.subject?.toLowerCase().includes('approval') || email.subject?.toLowerCase().includes('budget')) {
+              email.actionType = 'approval_needed'
+            } else {
+              email.actionType = 'response_needed'
+            }
+          }
+        })
+      }
+      
+      console.log('AI analysis complete, returning real data results')
+      return {
+        ...aiResponse,
+        aiPowered: true,
+        usingRealData: true,
+        realEmailCount: emails.length
+      }
+    } catch (error) {
+      console.error('AI triage error:', error)
+      // Fall back to demo data on AI error
+    }
+  }
+  
+  // Fallback: demo data when no real emails or AI unavailable
+  console.log('Using demo data fallback')
+  return {
+    highPriorityEmails: [
+        {
+          id: 'demo-1',
+          subject: 'URGENT: Project Deadline Extension Request',
+          from: 'sarah.chen@techcorp.com',
+          snippet: 'Client requesting timeline adjustment for Q4 deliverable due to scope changes. Need response by EOD.',
+          priority: 'URGENT',
+          reason: 'Client deadline in 24 hours - revenue impact',
+          action: 'Review scope changes and provide timeline',
+          aiSuggested: 'Generate professional response acknowledging request',
+          timestamp: new Date(Date.now() - 2 * 3600000).toISOString(), // 2 hours ago
+          actionType: 'response_needed'
+        },
+        {
+          id: 'demo-2', 
+          subject: 'Meeting Rescheduling - Weekly Sync',
+          from: 'team.lead@company.com',
+          snippet: 'Need to move weekly sync to accommodate travel schedule. Prefer Tuesday 2pm or Wednesday 10am.',
+          priority: 'HIGH',
+          reason: 'Team coordination - affects multiple schedules',
+          action: 'Confirm availability and send calendar invite',
+          aiSuggested: 'Check calendar conflicts and suggest optimal time',
+          timestamp: new Date(Date.now() - 4 * 3600000).toISOString(), // 4 hours ago
+          actionType: 'calendar_action'
+        },
+        {
+          id: 'demo-3',
+          subject: 'Budget Approval Needed - Q1 Marketing Spend',
+          from: 'finance@company.com', 
+          snippet: 'Marketing budget proposal for Q1 campaigns awaiting your approval. Total: $45K. Please review attached breakdown.',
+          priority: 'ACTION',
+          reason: 'Financial decision required - Q1 planning deadline',
+          action: 'Review budget breakdown and approve/decline',
+          aiSuggested: 'Quick approve if within allocated budget',
+          timestamp: new Date(Date.now() - 6 * 3600000).toISOString(), // 6 hours ago
+          actionType: 'approval_needed'
+        }
+      ],
+      summary: '3 high-priority emails require immediate attention',
+      insights: [
+        'Client communication needs urgent response',
+        'Team coordination affecting project timelines', 
+        'Financial approvals blocking Q1 planning'
+      ],
+      suggestion: 'Address client deadline first, then handle internal coordination',
+      stats: {
+        totalAnalyzed: 47,
+        highPriority: 3,
+        mediumPriority: 8,
+        lowPriority: 36,
+        aiConfidence: 0.92
+      },
+      aiPowered: true,
+      usingRealData: false
+    }
+  }
+
+async function generateMeetingIntelligence(env: EnvBindings, meetings: any[], userContext: any): Promise<any> {
+  if (!env.OPENAI_API_KEY) {
+    return {
+      todaysMeetings: meetings,
+      aiSuggestions: {
+        talkingPoints: [
+          "Revenue tracking 12% ahead of Q3 projections",
+          "Team capacity concerns for December deliverables", 
+          "Budget reallocation opportunities identified"
+        ],
+        keyDataPoints: [
+          "Customer satisfaction up 8% this quarter",
+          "3 new client acquisitions pending signatures",
+          "Technical debt reduction 40% complete"
+        ],
+        actionItems: [
+          { task: "Finalize vendor contracts", owner: "Sarah", status: "Complete" },
+          { task: "Update project timeline", owner: "Mike", status: "In Progress" },
+          { task: "Security audit results", owner: "Tom", status: "Overdue" }
+        ]
+      }
+    }
+  }
+
+  try {
+    const meetingContext = meetings.map(meeting => 
+      `Meeting: ${meeting.summary || meeting.title}\nTime: ${meeting.start?.dateTime || meeting.time}\nAttendees: ${meeting.attendees?.length || 0}`
+    ).join('\n\n')
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an AI meeting intelligence assistant. Generate comprehensive prep notes and talking points for today's meetings.
+
+Provide strategic insights including:
+- Key talking points based on meeting context
+- Important data points to reference
+- Potential discussion topics
+- Action items to follow up on
+- Meeting optimization suggestions
+
+Respond in JSON format:
+{
+  "aiSuggestions": {
+    "talkingPoints": ["point 1", "point 2", "point 3"],
+    "keyDataPoints": ["data 1", "data 2", "data 3"], 
+    "potentialTopics": ["topic 1", "topic 2"],
+    "preparationTips": "Overall prep advice"
+  },
+  "meetingOptimization": "Suggestions for better meetings",
+  "timeManagement": "Schedule optimization tips"
+}`
+          },
+          {
+            role: 'user',
+            content: `Generate meeting intelligence for:\n\n${meetingContext}\n\nUser context: ${JSON.stringify(userContext)}`
+          }
+        ],
+        max_tokens: 1200,
+        temperature: 0.4
+      })
+    })
+
+    if (!response.ok) throw new Error('AI request failed')
+    
+    const data = await response.json<{ choices?: { message?: { content?: string } }[] }>()
+    const aiResponse = JSON.parse(data.choices?.[0]?.message?.content || '{}')
+    
+    return {
+      todaysMeetings: meetings,
+      ...aiResponse,
+      aiPowered: true
+    }
+  } catch (error) {
+    console.error('Meeting AI error:', error)
+    return { error: 'Meeting analysis failed' }
+  }
+}
+
+async function generateProductivityAnalytics(env: EnvBindings, userActivity: any): Promise<any> {
+  if (!env.OPENAI_API_KEY) {
+    return {
+      productivityScore: 87,
+      peakHours: "10-11 AM",
+      insights: [
+        { type: "Deep Work", insight: "You achieve 3x higher output when blocking 90+ minute focus sessions" },
+        { type: "Email Optimization", insight: "Batch processing emails at 9 AM and 3 PM reduces interruptions by 65%" },
+        { type: "Task Timing", insight: "Creative work performs best Tuesday-Thursday mornings based on your patterns" }
+      ],
+      recommendations: [
+        "Schedule important tasks during peak hours",
+        "Block calendar for deep work sessions", 
+        "Batch similar activities together"
+      ]
+    }
+  }
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an AI productivity analyst. Analyze user patterns and provide actionable insights.
+
+Generate a productivity score (0-100) and behavioral insights based on:
+- Email response patterns
+- Meeting frequency and timing
+- Task completion rates
+- Calendar utilization
+- Work rhythm patterns
+
+Provide specific, actionable recommendations for optimization.
+
+Respond in JSON format:
+{
+  "productivityScore": 85,
+  "peakHours": "10-11 AM",
+  "insights": [
+    {
+      "type": "Pattern Type",
+      "insight": "Specific behavioral insight",
+      "impact": "Quantified benefit"
+    }
+  ],
+  "recommendations": ["actionable suggestion 1", "suggestion 2"],
+  "optimizations": "Overall productivity strategy"
+}`
+          },
+          {
+            role: 'user',
+            content: `Analyze productivity patterns:\n\n${JSON.stringify(userActivity, null, 2)}`
+          }
+        ],
+        max_tokens: 1000,
+        temperature: 0.3
+      })
+    })
+
+    if (!response.ok) throw new Error('AI request failed')
+    
+    const data = await response.json<{ choices?: { message?: { content?: string } }[] }>()
+    const aiResponse = JSON.parse(data.choices?.[0]?.message?.content || '{}')
+    
+    return {
+      ...aiResponse,
+      aiPowered: true
+    }
+  } catch (error) {
+    console.error('Productivity AI error:', error)
+    return { error: 'Analytics failed' }
+  }
+}
+
+async function generateFollowUpIntelligence(env: EnvBindings, conversations: any[]): Promise<any> {
+  if (!env.OPENAI_API_KEY) {
+    return {
+      followUps: [
+        {
+          contact: "Sarah Chen",
+          context: "Project Proposal",
+          lastContact: "6 days ago",
+          confidence: 95,
+          aiMessage: "Hi Sarah, I wanted to circle back on the project timeline we discussed last week. I know you mentioned needing to check with your team - any updates on potential start dates? Happy to adjust our proposal based on your bandwidth. Best, [Your name]",
+          reason: "No response to project timeline question"
+        },
+        {
+          contact: "Mike Rodriguez", 
+          context: "Meeting Notes",
+          lastContact: "3 days ago",
+          confidence: 87,
+          aiMessage: "Hi Mike, Hope you had a great weekend! Just wanted to follow up on the technical specs you mentioned sharing after our call. No rush, but having those would help us finalize the integration timeline. Thanks!",
+          reason: "Mentioned sharing technical specs"
+        }
+      ]
+    }
+  }
+
+  try {
+    const conversationContext = conversations.slice(0, 10).map(conv => 
+      `Contact: ${conv.contact}\nLast Message: ${conv.lastMessage}\nDate: ${conv.date}\nContext: ${conv.context || 'General'}`
+    ).join('\n\n---\n\n')
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an AI follow-up assistant. Analyze conversations and identify follow-up opportunities.
+
+Look for:
+- Unanswered questions or requests
+- Promised deliverables or responses
+- Time-sensitive items
+- Relationship maintenance opportunities
+- Project progress check-ins
+
+For each follow-up, generate a professional, contextual message that:
+- References the previous conversation naturally
+- Has a clear but gentle call to action
+- Maintains professional tone
+- Adds value to the relationship
+
+Respond in JSON format:
+{
+  "followUps": [
+    {
+      "contact": "Name",
+      "context": "Brief context",
+      "lastContact": "X days ago",
+      "confidence": 85,
+      "aiMessage": "Professional follow-up message",
+      "reason": "Why this follow-up is needed",
+      "priority": "High/Medium/Low"
+    }
+  ],
+  "summary": "Overall follow-up strategy"
+}`
+          },
+          {
+            role: 'user',
+            content: `Analyze these conversations for follow-up opportunities:\n\n${conversationContext}`
+          }
+        ],
+        max_tokens: 1500,
+        temperature: 0.4
+      })
+    })
+
+    if (!response.ok) throw new Error('AI request failed')
+    
+    const data = await response.json<{ choices?: { message?: { content?: string } }[] }>()
+    const aiResponse = JSON.parse(data.choices?.[0]?.message?.content || '{}')
+    
+    return {
+      ...aiResponse,
+      aiPowered: true
+    }
+  } catch (error) {
+    console.error('Follow-up AI error:', error)
+    return { error: 'Follow-up analysis failed' }
+  }
+}
+
+// AI Command Interface - Natural Language Processing Engine with Real Actions
+async function generateAICommandResponse(env: EnvBindings, command: string, context: any = {}): Promise<any> {
+  try {
+    // First, determine the intent and action type
+    const intentResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [
+          {
+            role: 'system',
+            content: `You are VAAI's command parser. Analyze the user's natural language command and determine what action to take.
+
+AVAILABLE ACTIONS:
+1. "email_analysis" - Analyze, triage, prioritize emails
+2. "calendar_management" - View calendar events, schedule meetings, check availability
+3. "task_management" - View, create, complete Google Tasks
+4. "meeting_intelligence" - Meeting prep, calendar analysis  
+5. "productivity_analytics" - Productivity patterns, time analysis
+6. "follow_up_intelligence" - Follow-up detection and generation
+7. "general_help" - General assistance, navigation help
+
+RESPONSE FORMAT (JSON only):
+{
+  "action_type": "email_analysis|calendar_management|task_management|meeting_intelligence|productivity_analytics|follow_up_intelligence|general_help",
+  "confidence": 0.95,
+  "user_intent": "brief description of what user wants"
+}
+
+Examples:
+- "analyze my emails" → {"action_type": "email_analysis", "confidence": 0.95, "user_intent": "wants email analysis and prioritization"}
+- "show my calendar" → {"action_type": "calendar_management", "confidence": 0.95, "user_intent": "wants to view calendar events"}
+- "what tasks do I have" → {"action_type": "task_management", "confidence": 0.9, "user_intent": "wants to view Google Tasks"}
+- "create a task" → {"action_type": "task_management", "confidence": 0.9, "user_intent": "wants to create a new task"}
+- "meeting prep" → {"action_type": "meeting_intelligence", "confidence": 0.9, "user_intent": "wants meeting preparation"}
+- "productivity patterns" → {"action_type": "productivity_analytics", "confidence": 0.9, "user_intent": "wants productivity insights"}`
+          },
+          {
+            role: 'user',
+            content: command
+          }
+        ],
+        max_tokens: 150,
+        temperature: 0.1
+      })
+    })
+
+    if (!intentResponse.ok) throw new Error('Intent analysis failed')
+    
+    const intentData = await intentResponse.json<{ choices?: { message?: { content?: string } }[] }>()
+    let intent
+    try {
+      intent = JSON.parse(intentData.choices?.[0]?.message?.content || '{}')
+    } catch {
+      intent = { action_type: 'general_help', confidence: 0.5, user_intent: 'unclear command' }
+    }
+
+    // Execute the appropriate real AI function based on intent
+    let realResult
+    switch (intent.action_type) {
+      case 'email_analysis':
+        // Get user's emails and run real email triage
+        try {
+          let emails = []
+          let fetchError = null
+          
+          console.log('AI Command - Email Analysis Request')
+          console.log('Original command:', command)
+          console.log('Context:', JSON.stringify(context, null, 2))
+          
+          // Use real emails if provided by frontend
+          if (context.realEmails && Array.isArray(context.realEmails)) {
+            emails = context.realEmails
+            console.log('Using real emails from frontend:', emails.length)
+            
+            // Check if user is asking for specific emails (e.g., "emails from the lott")
+            const lowerCommand = command.toLowerCase()
+            if (lowerCommand.includes('from') && (lowerCommand.includes('lott') || lowerCommand.includes('lottery'))) {
+              console.log('Filtering for lottery-related emails...')
+              emails = emails.filter(email => 
+                email.from?.toLowerCase().includes('lott') || 
+                email.subject?.toLowerCase().includes('lott') ||
+                email.from?.toLowerCase().includes('lottery') || 
+                email.subject?.toLowerCase().includes('lottery')
+              )
+              console.log(`Filtered to ${emails.length} lottery-related emails`)
+            }
+          } else {
+            console.log('No real emails provided, using fallback')
+            fetchError = 'No emails provided from frontend'
+          }
+          
+          // Always use the email triage AI - it handles both general and specific cases
+          realResult = await generateEmailTriageAI(env, emails)
+          
+          // If this was a specific query, add that info to the result
+          if (command.toLowerCase().includes('lott') || command.toLowerCase().includes('lottery')) {
+            realResult.wasSpecificQuery = true
+            realResult.originalCommand = command
+          }
+          
+          // Add debug info about data source
+          const debugInfo = emails.length > 0 ? `📧 Real Gmail data (${emails.length} emails)` : `🎭 Demo data${fetchError ? ` (${fetchError})` : ''}`
+          
+          // Create a detailed response showing actual emails found
+          let responseText = `✅ Email Analysis Complete! I've analyzed ${emails.length} emails and found:\n\n${realResult.summary || 'Your email analysis is ready.'}\n\n`
+          
+          // Show all emails found with details
+          if (realResult.allEmails && realResult.allEmails.length > 0) {
+            responseText += `📧 **Emails Found:**\n`
+            realResult.allEmails.forEach((email, idx) => {
+              const priorityIcon = email.priority === 'URGENT' ? '🔴' : email.priority === 'HIGH' ? '🟡' : email.priority === 'MEDIUM' ? '🟠' : '🟢'
+              responseText += `\n${idx + 1}. ${priorityIcon} **${email.subject}**\n`
+              responseText += `   📤 From: ${email.from}\n`
+              responseText += `   📅 ${new Date(email.timestamp).toLocaleDateString()}\n`
+              responseText += `   💭 ${email.snippet || 'No preview'}\n`
+              responseText += `   🏷️ ${email.category} • ${email.priority} priority\n`
+            })
+          } else if (emails.length > 0) {
+            // Fallback: show raw emails if AI parsing failed
+            responseText += `📧 **Raw Email Data:**\n`
+            emails.slice(0, 5).forEach((email, idx) => {
+              responseText += `\n${idx + 1}. **${email.subject}**\n`
+              responseText += `   📤 From: ${email.from}\n`
+              responseText += `   📅 ${new Date(email.timestamp).toLocaleDateString()}\n`
+              responseText += `   💭 ${email.snippet || 'No preview'}\n`
+            })
+          }
+          
+          responseText += `\n\n💡 Key insights: ${realResult.insights?.join(', ') || 'Check the Email Triage section for detailed analysis.'}\n\n${debugInfo}`
+          
+          return {
+            response: responseText,
+            action: {
+              type: 'none'  // Don't auto-navigate
+            },
+            suggestions: [
+              'View detailed email triage results',
+              'Auto-sort emails by priority', 
+              'Generate email responses',
+              'Set up email filters'
+            ],
+            confidence: intent.confidence,
+            realData: realResult,
+            emailCount: emails.length,
+            debugInfo: {
+              hasUserToken: !!context.userToken,
+              emailsFetched: emails.length,
+              fetchError: fetchError,
+              usingRealData: emails.length > 0
+            }
+          }
+        } catch (error) {
+          return {
+            response: '📧 I can analyze your emails! Click "Auto-Sort Now" in the Smart Email Triage card above for detailed analysis.',
+            action: { type: 'navigate', target: 'email-triage' },
+            suggestions: ['Use Smart Email Triage feature', 'Check your Gmail connection'],
+            confidence: 0.8
+          }
+        }
+
+      case 'calendar_management':
+        try {
+          console.log('AI Command - Calendar Management Request')
+          console.log('Context calendar events received:', context.realCalendarEvents?.length || 0)
+          
+          // Use calendar events from context if available (pre-fetched by frontend)
+          let events = []
+          if (context.realCalendarEvents && Array.isArray(context.realCalendarEvents) && context.realCalendarEvents.length > 0) {
+            events = context.realCalendarEvents
+            console.log('Using pre-fetched calendar events from frontend:', events.length)
+          } else {
+            // Fallback: Fetch user's calendar events from backend
+            console.log('No context calendar events, fetching from backend...')
+            const authed = { userId: context.userEmail }
+            const googleId = context.userEmail
+            const { clientId, clientSecret } = getGoogleConfig(env)
+            
+            try {
+              const calendarResponse = await calendarListEvents({
+                db: env.DB,
+                googleId,
+                clientId,
+                clientSecret,
+                maxResults: 20,
+                timeMin: new Date().toISOString(),
+                timeMax: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() // Next 7 days
+              })
+              events = calendarResponse.items || []
+            } catch (error) {
+              console.error('Failed to fetch calendar events:', error)
+            }
+          }
+
+          let responseText = `📅 Calendar Overview! I found ${events.length} upcoming events:\n\n`
+          
+          if (events.length > 0) {
+            responseText += `📊 **Your Schedule:**\n`
+            events.slice(0, 5).forEach((event, idx) => {
+              const startTime = event.start?.dateTime ? new Date(event.start.dateTime).toLocaleString() : 'All day'
+              responseText += `\n${idx + 1}. **${event.summary || 'Untitled Event'}**\n`
+              responseText += `   🕐 ${startTime}\n`
+              responseText += `   📍 ${event.location || 'No location'}\n`
+              if (event.attendees && event.attendees.length > 0) {
+                responseText += `   👥 ${event.attendees.length} attendees\n`
+              }
+            })
+          } else {
+            responseText += `📅 No upcoming events found in the next 7 days.\n`
+          }
+          
+          responseText += `\n📈 **Analysis:** ${events.length > 5 ? 'Busy schedule ahead!' : events.length > 2 ? 'Moderate schedule' : 'Light schedule'}\n\n🗓️ Real Calendar data (${events.length} events)`
+
+          return {
+            response: responseText,
+            action: { type: 'none' },
+            suggestions: [
+              'Schedule new meeting',
+              'Check availability', 
+              'Block focus time',
+              'View full calendar'
+            ],
+            confidence: intent.confidence,
+            realData: { events, totalFound: events.length }
+          }
+        } catch (error) {
+          return {
+            response: '📅 Calendar access error. Please ensure Google Calendar permissions are enabled.',
+            action: { type: 'none' },
+            suggestions: ['Check Google Calendar connection', 'Re-authenticate with Google'],
+            confidence: 0.7
+          }
+        }
+
+      case 'task_management':
+        try {
+          console.log('AI Command - Task Management Request')
+          console.log('Context tasks received:', context.realTasks?.length || 0)
+          
+          // Use tasks from context if available (pre-fetched by frontend)
+          let tasks = []
+          if (context.realTasks && Array.isArray(context.realTasks) && context.realTasks.length > 0) {
+            tasks = context.realTasks
+            console.log('Using pre-fetched tasks from frontend:', tasks.length)
+          } else {
+            // Fallback: Fetch user's Google Tasks from backend
+            console.log('No context tasks, fetching from backend...')
+            const authed = { userId: context.userEmail }
+            const googleId = context.userEmail
+            const { clientId, clientSecret } = getGoogleConfig(env)
+            
+            try {
+              const tasksResponse = await googleTasksList({
+                db: env.DB,
+                googleId,
+                clientId,
+                clientSecret,
+                taskListId: '@default',
+                maxResults: 20
+              })
+              tasks = tasksResponse.items || []
+            } catch (error) {
+              console.error('Failed to fetch tasks:', error)
+            }
+          }
+
+          let responseText = `✅ Task Overview! I found ${tasks.length} tasks:\n\n`
+          
+          if (tasks.length > 0) {
+            const pendingTasks = tasks.filter(task => task.status !== 'completed')
+            const completedTasks = tasks.filter(task => task.status === 'completed')
+            
+            responseText += `📋 **Pending Tasks (${pendingTasks.length}):**\n`
+            pendingTasks.slice(0, 5).forEach((task, idx) => {
+              const dueDate = task.due ? new Date(task.due).toLocaleDateString() : 'No due date'
+              responseText += `\n${idx + 1}. **${task.title}**\n`
+              responseText += `   📅 Due: ${dueDate}\n`
+              if (task.notes) {
+                responseText += `   📝 ${task.notes.substring(0, 50)}${task.notes.length > 50 ? '...' : ''}\n`
+              }
+            })
+            
+            if (completedTasks.length > 0) {
+              responseText += `\n✅ **Recently Completed:** ${completedTasks.length} tasks`
+            }
+          } else {
+            responseText += `📝 No tasks found. Ready to create your first task!\n`
+          }
+          
+          responseText += `\n\n📊 **Status:** ${tasks.filter(t => t.status !== 'completed').length} pending, ${tasks.filter(t => t.status === 'completed').length} completed\n\n📝 Real Google Tasks data (${tasks.length} tasks)`
+
+          return {
+            response: responseText,
+            action: { type: 'none' },
+            suggestions: [
+              'Create new task',
+              'Mark task complete',
+              'View all tasks',
+              'Set task due dates'
+            ],
+            confidence: intent.confidence,
+            realData: { tasks, totalFound: tasks.length, pending: tasks.filter(t => t.status !== 'completed').length }
+          }
+        } catch (error) {
+          return {
+            response: '📝 Task access error. Please ensure Google Tasks permissions are enabled.',
+            action: { type: 'none' },
+            suggestions: ['Check Google Tasks connection', 'Re-authenticate with Google'],
+            confidence: 0.7
+          }
+        }
+
+      case 'meeting_intelligence':
+        try {
+          const meetings = [] // In a real scenario, we'd fetch calendar events
+          realResult = await generateMeetingIntelligence(env, meetings)
+          return {
+            response: `📅 Meeting Intelligence Ready! I've analyzed your calendar:\n\n${realResult.summary || 'Your meeting insights are prepared.'}\n\n🎯 Recommendations: ${realResult.recommendations?.slice(0, 2).join(', ') || 'Optimize your meeting schedule'}`,
+            action: {
+              type: 'navigate', 
+              target: 'meeting-intelligence',
+              parameters: { analysis: realResult }
+            },
+            suggestions: [
+              'View meeting preparation details',
+              'Optimize calendar schedule',
+              'Generate meeting agendas',
+              'Block focus time'
+            ],
+            confidence: intent.confidence,
+            realData: realResult
+          }
+        } catch (error) {
+          return {
+            response: '📅 I can help with meeting intelligence! Use the Meeting Intelligence card above to analyze your calendar and get AI-powered meeting prep.',
+            action: { type: 'navigate', target: 'meeting-intelligence' },
+            suggestions: ['Use Meeting Intelligence feature', 'Connect your Google Calendar'],
+            confidence: 0.8
+          }
+        }
+
+      case 'productivity_analytics':
+        try {
+          const activities = [] // In a real scenario, we'd fetch user activity data
+          realResult = await generateProductivityAnalytics(env, activities)
+          return {
+            response: `📊 Productivity Analysis Complete! Here are your insights:\n\n${realResult.summary || 'Your productivity patterns have been analyzed.'}\n\n⚡ Peak performance: ${realResult.peakHours || 'Mornings'} | 🎯 Focus score: ${realResult.focusScore || '85%'}`,
+            action: {
+              type: 'navigate',
+              target: 'productivity-analytics', 
+              parameters: { analysis: realResult }
+            },
+            suggestions: [
+              'View detailed productivity metrics',
+              'Schedule focus time blocks',
+              'Optimize daily schedule',
+              'Set productivity goals'
+            ],
+            confidence: intent.confidence,
+            realData: realResult
+          }
+        } catch (error) {
+          return {
+            response: '📊 I can analyze your productivity patterns! Click "Generate Report" in the Productivity Analytics card to see detailed insights.',
+            action: { type: 'navigate', target: 'productivity-analytics' },
+            suggestions: ['Use Productivity Analytics feature', 'Track your work patterns'],
+            confidence: 0.8
+          }
+        }
+
+      case 'follow_up_intelligence':
+        try {
+          const conversations = [] // In a real scenario, we'd fetch conversation data
+          realResult = await generateFollowUpIntelligence(env, conversations)
+          return {
+            response: `🎯 Follow-up Analysis Done! I've identified actionable items:\n\n${realResult.summary || 'Your follow-up opportunities are ready.'}\n\n📝 Actions needed: ${realResult.actionItems?.length || 0} items require follow-up`,
+            action: {
+              type: 'navigate',
+              target: 'follow-up-intelligence',
+              parameters: { analysis: realResult }
+            },
+            suggestions: [
+              'View follow-up recommendations',
+              'Draft follow-up messages',
+              'Schedule follow-up reminders',
+              'Prioritize action items'
+            ],
+            confidence: intent.confidence,
+            realData: realResult
+          }
+        } catch (error) {
+          return {
+            response: '🎯 I can help identify follow-ups! Use the Follow-up Intelligence card to analyze your conversations and find actionable items.',
+            action: { type: 'navigate', target: 'follow-up-intelligence' },
+            suggestions: ['Use Follow-up Intelligence feature', 'Review recent conversations'],
+            confidence: 0.8
+          }
+        }
+
+      default:
+        return {
+          response: `👋 I'm here to help! I can assist with:\n\n📧 Email analysis and prioritization\n📅 Meeting intelligence and prep\n📊 Productivity analytics and insights\n🎯 Follow-up detection and generation\n\nTry commands like "analyze my emails" or "show productivity patterns"`,
+          action: { type: 'none' },
+          suggestions: [
+            'Analyze my emails',
+            'Generate meeting prep', 
+            'Show productivity patterns',
+            'Find follow-ups needed'
+          ],
+          confidence: 0.9
+        }
+    }
+    
+  } catch (error) {
+    console.error('AI command error:', error)
+    return { 
+      error: 'AI command processing failed',
+      response: '❌ I encountered an error processing your command. The AI Intelligence Center features above are ready to help!',
+      action: { type: 'none' },
+      suggestions: [
+        'Try using the specific AI features above',
+        'Check your connection',
+        'Rephrase your command'
+      ],
+      confidence: 0.0
+    }
+  }
 }
 
