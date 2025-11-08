@@ -1,9 +1,13 @@
 import { defineConfig } from 'vite'
-build: { sourcemap: true }
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  build: { 
+    sourcemap: true,
+    outDir: 'dist',
+    assetsDir: 'assets'
+  },
   server: {
     port: 3002,
     host: 'localhost',
@@ -19,5 +23,8 @@ export default defineConfig({
         secure: false
       }
     }
+  },
+  define: {
+    'import.meta.env.VITE_API_BASE_URL': JSON.stringify(process.env.VITE_API_BASE_URL || 'https://vaai-backend-worker.dnash29.workers.dev')
   }
 })

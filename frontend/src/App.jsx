@@ -1284,7 +1284,7 @@ function App() {
                   borderRadius: '16px 16px 0 0',
                   color: 'white'
                 }}>
-                  <h3 style={{ margin: 0, fontSize: '18px' }}>AI Assistant - v2.1</h3>
+                  <h3 style={{ margin: 0, fontSize: '18px' }}>AI Assistant - v2.5 FORCE UPDATE</h3>
                   <p style={{ margin: '4px 0 0', opacity: 0.9, fontSize: '14px' }}>Ask me anything about your work</p>
                 </div>
                 

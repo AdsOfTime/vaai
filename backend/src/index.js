@@ -2,7 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const morgan = require('morgan');
 require('dotenv').config();
+
+// Import logging and error handling
+const { logger, morganStream, logApiCall, logBackgroundJob } = require('./utils/logger');
+const { 
+  errorHandler, 
+  requestId, 
+  notFoundHandler,
+  AppError 
+} = require('./utils/errorHandler');
 
 const authRoutes = require('./routes/auth');
 const emailRoutes = require('./routes/emails');
@@ -18,6 +28,7 @@ const monetizationRoutes = require('./routes/monetization');
 const gmailComposeRoutes = require('./routes/gmailCompose');
 const googleDocsRoutes = require('./routes/googleDocs');
 const googleSheetsRoutes = require('./routes/googleSheets');
+const advancedAIRoutes = require('./routes/advancedAI');
 const { initDatabase } = require('./database/init');
 const { getAllTeams } = require('./database/teams');
 const { discoverFollowUpsForTeam } = require('./services/followUpDetector');
@@ -27,25 +38,84 @@ const { generateMeetingBriefsForTeam } = require('./services/meetingPrepGenerato
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Request ID middleware (before logging)
+app.use(requestId);
+
+// HTTP request logging
+app.use(morgan('combined', { stream: morganStream }));
+
 // Security middleware
-app.use(helmet());
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? ['https://your-domain.com'] 
-    : ['http://localhost:3000'],
-  credentials: true
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "https://api.openai.com", "https://accounts.google.com", "https://www.googleapis.com"]
+    }
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
 }));
 
-// Rate limiting
+// CORS configuration
+const corsOrigins = process.env.CORS_ORIGINS 
+  ? process.env.CORS_ORIGINS.split(',')
+  : process.env.NODE_ENV === 'production' 
+    ? ['https://your-domain.com'] 
+    : ['http://localhost:3000', 'http://localhost:3002'];
+
+app.use(cors({
+  origin: corsOrigins,
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Team-Id', 'X-Request-ID']
+}));
+
+// Enhanced rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: process.env.NODE_ENV === 'production' ? 100 : 1000,
+  message: {
+    error: 'Too many requests from this IP, please try again later.',
+    code: 'RATE_LIMIT_EXCEEDED'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('Rate limit exceeded', {
+      ip: req.ip,
+      userAgent: req.get('User-Agent'),
+      url: req.originalUrl
+    });
+    res.status(429).json({
+      error: 'Too many requests from this IP, please try again later.',
+      code: 'RATE_LIMIT_EXCEEDED'
+    });
+  }
 });
 app.use(limiter);
 
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// Body parsing middleware with enhanced security
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf, encoding) => {
+    try {
+      JSON.parse(buf);
+    } catch (err) {
+      throw new AppError('Invalid JSON format', 400, 'INVALID_JSON');
+    }
+  }
+}));
+app.use(express.urlencoded({ 
+  extended: true,
+  limit: '10mb'
+}));
 
 // Routes
 app.use('/auth', authRoutes);
@@ -62,37 +132,76 @@ app.use('/api/monetization', monetizationRoutes);
 app.use('/api/gmail/compose', gmailComposeRoutes);
 app.use('/api/google/docs', googleDocsRoutes);
 app.use('/api/google/sheets', googleSheetsRoutes);
+app.use('/api/advanced-ai', advancedAIRoutes);
 
-// Health check
+// Health check with enhanced information
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ 
-    error: 'Something went wrong!',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+  const healthData = {
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV,
+    version: process.env.npm_package_version || '1.0.0',
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    requestId: req.id
+  };
+  
+  logger.debug('Health check requested', { 
+    ip: req.ip,
+    userAgent: req.get('User-Agent')
   });
+  
+  res.json(healthData);
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+// 404 handler (must be before error handler)
+app.use(notFoundHandler);
+
+// Global error handling middleware
+app.use(errorHandler);
 
 // Initialize database and start server
 async function startServer() {
   try {
+    logger.info('Initializing VAAI Backend...');
+    
+    // Initialize database
     await initDatabase();
-    app.listen(PORT, () => {
-      console.log(`VAAI Backend running on port ${PORT}`);
-      console.log(`Environment: ${process.env.NODE_ENV}`);
+    logger.info('Database initialized successfully');
+    
+    // Start server
+    const server = app.listen(PORT, () => {
+      logger.info(`VAAI Backend running on port ${PORT}`, {
+        port: PORT,
+        environment: process.env.NODE_ENV,
+        corsOrigins,
+        logLevel: logger.level
+      });
     });
+    
+    // Graceful shutdown handling
+    process.on('SIGTERM', () => {
+      logger.info('SIGTERM received, shutting down gracefully');
+      server.close(() => {
+        logger.info('Server closed');
+        process.exit(0);
+      });
+    });
+    
+    process.on('SIGINT', () => {
+      logger.info('SIGINT received, shutting down gracefully');
+      server.close(() => {
+        logger.info('Server closed');
+        process.exit(0);
+      });
+    });
+    
+    // Start background jobs
     startBackgroundJobs();
+    logger.info('Background jobs started');
+    
   } catch (error) {
-    console.error('Failed to start server:', error);
+    logger.error('Failed to start server', { error: error.message, stack: error.stack });
     process.exit(1);
   }
 }
@@ -104,13 +213,34 @@ let meetingPrepLock = false;
 async function runFollowUpDiscovery() {
   if (discoveryLock) return;
   discoveryLock = true;
+  
+  const startTime = Date.now();
+  logBackgroundJob('follow-up-discovery', 'started');
+  
   try {
     const teams = await getAllTeams();
+    let processedTeams = 0;
+    let totalFollowUps = 0;
+    
     for (const team of teams) {
-      await discoverFollowUpsForTeam(team.id);
+      const result = await discoverFollowUpsForTeam(team.id);
+      processedTeams++;
+      totalFollowUps += result?.count || 0;
     }
+    
+    const duration = Date.now() - startTime;
+    logBackgroundJob('follow-up-discovery', 'completed', {
+      processedTeams,
+      totalFollowUps,
+      duration
+    });
   } catch (error) {
-    console.error('Follow-up discovery job failed:', error);
+    const duration = Date.now() - startTime;
+    logBackgroundJob('follow-up-discovery', 'failed', {
+      error: error.message,
+      duration
+    });
+    logger.error('Follow-up discovery job failed', { error: error.message, stack: error.stack });
   } finally {
     discoveryLock = false;
   }
@@ -119,10 +249,26 @@ async function runFollowUpDiscovery() {
 async function runFollowUpScheduler() {
   if (schedulerLock) return;
   schedulerLock = true;
+  
+  const startTime = Date.now();
+  logBackgroundJob('follow-up-scheduler', 'started');
+  
   try {
-    await processDueFollowUps();
+    const result = await processDueFollowUps();
+    const duration = Date.now() - startTime;
+    
+    logBackgroundJob('follow-up-scheduler', 'completed', {
+      processedFollowUps: result?.processed || 0,
+      sentEmails: result?.sent || 0,
+      duration
+    });
   } catch (error) {
-    console.error('Follow-up scheduler job failed:', error);
+    const duration = Date.now() - startTime;
+    logBackgroundJob('follow-up-scheduler', 'failed', {
+      error: error.message,
+      duration
+    });
+    logger.error('Follow-up scheduler job failed', { error: error.message, stack: error.stack });
   } finally {
     schedulerLock = false;
   }
@@ -131,13 +277,34 @@ async function runFollowUpScheduler() {
 async function runMeetingPrep() {
   if (meetingPrepLock) return;
   meetingPrepLock = true;
+  
+  const startTime = Date.now();
+  logBackgroundJob('meeting-prep', 'started');
+  
   try {
     const teams = await getAllTeams();
+    let processedTeams = 0;
+    let generatedBriefs = 0;
+    
     for (const team of teams) {
-      await generateMeetingBriefsForTeam(team.id);
+      const result = await generateMeetingBriefsForTeam(team.id);
+      processedTeams++;
+      generatedBriefs += result?.count || 0;
     }
+    
+    const duration = Date.now() - startTime;
+    logBackgroundJob('meeting-prep', 'completed', {
+      processedTeams,
+      generatedBriefs,
+      duration
+    });
   } catch (error) {
-    console.error('Meeting prep job failed:', error);
+    const duration = Date.now() - startTime;
+    logBackgroundJob('meeting-prep', 'failed', {
+      error: error.message,
+      duration
+    });
+    logger.error('Meeting prep job failed', { error: error.message, stack: error.stack });
   } finally {
     meetingPrepLock = false;
   }
@@ -148,14 +315,39 @@ function startBackgroundJobs() {
   const schedulerMinutes = Number.parseInt(process.env.FOLLOW_UP_SCHEDULER_INTERVAL_MINUTES, 10) || 5;
   const meetingPrepMinutes = Number.parseInt(process.env.MEETING_PREP_INTERVAL_MINUTES, 10) || 60;
 
-  // Initial runs
-  runFollowUpDiscovery();
-  runFollowUpScheduler();
-  runMeetingPrep();
+  logger.info('Configuring background jobs', {
+    followUpDiscoveryInterval: `${discoveryMinutes} minutes`,
+    followUpSchedulerInterval: `${schedulerMinutes} minutes`,
+    meetingPrepInterval: `${meetingPrepMinutes} minutes`
+  });
 
-  setInterval(runFollowUpDiscovery, discoveryMinutes * 60 * 1000);
-  setInterval(runFollowUpScheduler, schedulerMinutes * 60 * 1000);
-  setInterval(runMeetingPrep, meetingPrepMinutes * 60 * 1000);
+  // Delayed initial runs to allow server to fully start
+  setTimeout(() => {
+    runFollowUpDiscovery();
+    runFollowUpScheduler();
+    runMeetingPrep();
+  }, 10000);
+
+  // Set up intervals
+  const discoveryInterval = setInterval(runFollowUpDiscovery, discoveryMinutes * 60 * 1000);
+  const schedulerInterval = setInterval(runFollowUpScheduler, schedulerMinutes * 60 * 1000);
+  const meetingPrepInterval = setInterval(runMeetingPrep, meetingPrepMinutes * 60 * 1000);
+
+  // Store intervals for cleanup
+  process.backgroundIntervals = {
+    discovery: discoveryInterval,
+    scheduler: schedulerInterval,
+    meetingPrep: meetingPrepInterval
+  };
+
+  // Clean up intervals on shutdown
+  process.on('SIGTERM', () => {
+    Object.values(process.backgroundIntervals).forEach(clearInterval);
+  });
+  
+  process.on('SIGINT', () => {
+    Object.values(process.backgroundIntervals).forEach(clearInterval);
+  });
 }
 
 startServer();

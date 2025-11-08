@@ -1,0 +1,2268 @@
+import React, { useState, useEffect } from 'react';
+import './EnhancedUI.css';
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [currentView, setCurrentView] = useState('dashboard');
+  
+  // AI Assistant state
+  const [assistantMessages, setAssistantMessages] = useState([
+    { role: 'assistant', content: 'Hello! I\'m your AI assistant. How can I help you today?' }
+  ]);
+  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantLoading, setAssistantLoading] = useState(false);
+
+  // Data states
+  const [emails, setEmails] = useState([]);
+  const [calendar, setCalendar] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [dailyFocus, setDailyFocus] = useState({
+    priority: 'Complete quarterly review',
+    meetings: 3,
+    emails: 12,
+    tasks: 8
+  });
+
+  useEffect(() => {
+    checkAuthStatus();
+    if (user) {
+      loadData();
+    }
+  }, [user]);
+
+  const checkAuthStatus = async () => {
+    try {
+      const response = await fetch('/api/auth/status');
+      if (response.ok) {
+        const userData = await response.json();
+        setUser(userData);
+      }
+    } catch (error) {
+      console.error('Auth check failed:', error);
+    }
+    setLoading(false);
+  };
+
+  const loadData = async () => {
+    try {
+      // Load emails, calendar, tasks in parallel
+      const [emailRes, calendarRes, tasksRes] = await Promise.all([
+        fetch('/api/emails').catch(() => ({ json: () => [] })),
+        fetch('/api/calendar').catch(() => ({ json: () => [] })),
+        fetch('/api/tasks').catch(() => ({ json: () => [] }))
+      ]);
+
+      setEmails(await emailRes.json() || []);
+      setCalendar(await calendarRes.json() || []);
+      setTasks(await tasksRes.json() || []);
+    } catch (error) {
+      console.error('Failed to load data:', error);
+    }
+  };
+
+  const handleLogin = () => {
+    window.location.href = '/api/auth/google';
+  };
+
+  const handleAssistantMessage = async () => {
+    if (!assistantInput.trim() || assistantLoading) return;
+
+    const userMessage = assistantInput.trim();
+    setAssistantInput('');
+    setAssistantLoading(true);
+    
+    setAssistantMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+
+    try {
+      const response = await fetch('/api/assistant/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message: userMessage,
+          context: { emails, calendar, tasks }
+        })
+      });
+      
+      const data = await response.json();
+      setAssistantMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
+    } catch (error) {
+      setAssistantMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: 'Sorry, I encountered an error. Please try again.' 
+      }]);
+    }
+    
+    setAssistantLoading(false);
+  };
+
+  const renderLarkSidebar = () => (
+    <div className={`vaai-sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
+      <div className="vaai-sidebar-header">
+        <div className="vaai-sidebar-brand">
+          <div className="vaai-sidebar-logo">🔍</div>
+          <div className="vaai-sidebar-title">VAAI</div>
+        </div>
+        <button 
+          className="vaai-sidebar-toggle"
+          onClick={() => setSidebarVisible(false)}
+          title="Hide sidebar"
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="vaai-sidebar-search">
+        <input type="text" placeholder="Search..." />
+        <span className="search-icon">🔍</span>
+      </div>
+
+      <nav className="vaai-sidebar-nav">
+        <div className="nav-section">
+          <div className="nav-section-title">Workspace</div>
+          <div className="nav-items">
+            {[
+              { id: 'dashboard', icon: '🏠', label: 'Dashboard', badge: null },
+              { id: 'focus', icon: '🎯', label: 'Daily Focus', badge: '3' },
+              { id: 'inbox', icon: '📧', label: 'Smart Inbox', badge: emails.length || '12' },
+              { id: 'calendar', icon: '📅', label: 'Calendar', badge: calendar.length || '5' },
+              { id: 'tasks', icon: '✅', label: 'Tasks', badge: tasks.length || '8' },
+              { id: 'docs', icon: '📄', label: 'Documents', badge: null },
+              { id: 'sheets', icon: '📊', label: 'Sheets', badge: null }
+            ].map(item => (
+              <div 
+                key={item.id}
+                className={`nav-item ${currentView === item.id ? 'active' : ''}`}
+                onClick={() => setCurrentView(item.id)}
+              >
+                <span className="nav-icon">{item.icon}</span>
+                <span className="nav-label">{item.label}</span>
+                {item.badge && <span className="nav-badge">{item.badge}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="nav-section">
+          <div className="nav-section-title">AI Tools</div>
+          <div className="nav-items">
+            {[
+              { id: 'assistant', icon: '🤖', label: 'AI Assistant', badge: null },
+              { id: 'compose', icon: '✍️', label: 'Email Composer', badge: null },
+              { id: 'analyzer', icon: '📈', label: 'Data Analysis', badge: null },
+              { id: 'automation', icon: '⚡', label: 'Automation', badge: '2' }
+            ].map(item => (
+              <div 
+                key={item.id}
+                className={`nav-item ${currentView === item.id ? 'active' : ''}`}
+                onClick={() => setCurrentView(item.id)}
+              >
+                <span className="nav-icon">{item.icon}</span>
+                <span className="nav-label">{item.label}</span>
+                {item.badge && <span className="nav-badge">{item.badge}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </nav>
+    </div>
+  );
+
+  if (loading) {
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        height: '100vh',
+        background: '#f8fafc'
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔍</div>
+          <div style={{ fontSize: '18px', color: '#64748b' }}>Loading VAAI...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        height: '100vh',
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+      }}>
+        <div style={{
+          background: 'white',
+          borderRadius: '24px',
+          padding: '48px',
+          textAlign: 'center',
+          maxWidth: '400px',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.1)'
+        }}>
+          <div style={{ fontSize: '64px', marginBottom: '24px' }}>🔍</div>
+          <h1 style={{
+            fontSize: '32px',
+            fontWeight: '800',
+            marginBottom: '12px',
+            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent'
+          }}>
+            Welcome to VAAI
+          </h1>
+          <p style={{
+            color: '#64748b',
+            marginBottom: '32px',
+            fontSize: '16px',
+            lineHeight: '1.5'
+          }}>
+            Your AI-powered productivity assistant for email, calendar, and task management.
+          </p>
+          <button
+            onClick={handleLogin}
+            style={{
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              color: 'white',
+              border: 'none',
+              padding: '16px 32px',
+              borderRadius: '12px',
+              fontSize: '16px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              width: '100%',
+              marginBottom: '16px'
+            }}
+          >
+            Continue with Google
+          </button>
+          <p style={{
+            fontSize: '14px',
+            color: '#64748b'
+          }}>
+            Start on the Solo plan — upgrade to Business once your team is ready.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const renderMainContent = () => {
+    switch (currentView) {
+      case 'focus':
+        return (
+          <div style={{
+            background: 'white',
+            borderRadius: '20px',
+            padding: '32px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+            border: '1px solid rgba(0,0,0,0.05)'
+          }}>
+            <h2 style={{
+              fontSize: '28px',
+              fontWeight: '700',
+              marginBottom: '8px',
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent'
+            }}>
+              Daily Focus
+            </h2>
+            <p style={{ color: '#64748b', marginBottom: '32px' }}>
+              Your AI-curated priority for today
+            </p>
+
+            <div style={{
+              background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+              borderRadius: '16px',
+              padding: '24px',
+              color: 'white',
+              marginBottom: '24px'
+            }}>
+              <h3 style={{ fontSize: '20px', fontWeight: '600', marginBottom: '8px' }}>
+                Today's Priority
+              </h3>
+              <p style={{ fontSize: '16px', opacity: 0.9 }}>
+                {dailyFocus.priority}
+              </p>
+            </div>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: '16px'
+            }}>
+              {[
+                { label: 'Meetings Today', value: dailyFocus.meetings, icon: '📅', color: '#667eea' },
+                { label: 'Unread Emails', value: dailyFocus.emails, icon: '📧', color: '#f093fb' },
+                { label: 'Pending Tasks', value: dailyFocus.tasks, icon: '✅', color: '#64748b' }
+              ].map((item, index) => (
+                <div key={index} style={{
+                  background: '#f8fafc',
+                  borderRadius: '12px',
+                  padding: '20px',
+                  textAlign: 'center',
+                  border: '1px solid #e2e8f0'
+                }}>
+                  <div style={{ fontSize: '24px', marginBottom: '8px' }}>{item.icon}</div>
+                  <div style={{
+                    fontSize: '24px',
+                    fontWeight: '700',
+                    color: item.color,
+                    marginBottom: '4px'
+                  }}>
+                    {item.value}
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '500' }}>
+                    {item.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+
+      case 'inbox':
+        return (
+          <div style={{
+            background: 'white',
+            borderRadius: '20px',
+            padding: '32px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+            border: '1px solid rgba(0,0,0,0.05)'
+          }}>
+            <h2 style={{
+              fontSize: '28px',
+              fontWeight: '700',
+              marginBottom: '8px',
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent'
+            }}>
+              Smart Inbox
+            </h2>
+            <p style={{ color: '#64748b', marginBottom: '32px' }}>
+              AI-organized and prioritized emails
+            </p>
+
+            <div style={{ display: 'grid', gap: '16px' }}>
+              {[
+                { category: 'Priority', count: 3, color: '#f093fb', emails: [
+                  { subject: 'Q4 Budget Review Meeting', from: 'sarah@company.com', time: '2 hours ago' },
+                  { subject: 'Project Deadline Extension', from: 'mike@client.com', time: '4 hours ago' }
+                ]},
+                { category: 'Work', count: 5, color: '#667eea', emails: [
+                  { subject: 'Team Standup Notes', from: 'team@company.com', time: '1 hour ago' }
+                ]},
+                { category: 'Personal', count: 4, color: '#64748b', emails: [
+                  { subject: 'Weekend Plans', from: 'friend@gmail.com', time: '3 hours ago' }
+                ]}
+              ].map((category, index) => (
+                <div key={index} style={{
+                  border: `2px solid ${category.color}20`,
+                  borderRadius: '12px',
+                  padding: '20px'
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '16px'
+                  }}>
+                    <h3 style={{
+                      fontSize: '18px',
+                      fontWeight: '600',
+                      color: category.color
+                    }}>
+                      {category.category}
+                    </h3>
+                    <span style={{
+                      background: category.color,
+                      color: 'white',
+                      padding: '4px 8px',
+                      borderRadius: '12px',
+                      fontSize: '12px',
+                      fontWeight: '600'
+                    }}>
+                      {category.count}
+                    </span>
+                  </div>
+                  {category.emails.map((email, emailIndex) => (
+                    <div key={emailIndex} style={{
+                      padding: '12px 0',
+                      borderBottom: emailIndex < category.emails.length - 1 ? '1px solid #e2e8f0' : 'none'
+                    }}>
+                      <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '4px' }}>
+                        {email.subject}
+                      </div>
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        fontSize: '12px',
+                        color: '#64748b'
+                      }}>
+                        <span>{email.from}</span>
+                        <span>{email.time}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+
+      default:
+        return (
+          <div style={{
+            display: 'grid',
+            gap: '24px',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))'
+          }}>
+            <div style={{
+              background: 'white',
+              borderRadius: '20px',
+              padding: '24px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+              border: '1px solid rgba(0,0,0,0.05)'
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                marginBottom: '16px'
+              }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+                  borderRadius: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '20px'
+                }}>🎯</div>
+                <h3 style={{ fontSize: '20px', fontWeight: '700', color: '#1e293b' }}>
+                  Daily Focus
+                </h3>
+              </div>
+              <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '16px' }}>
+                Your AI-curated priority for today
+              </p>
+              <div style={{
+                background: '#f8fafc',
+                padding: '16px',
+                borderRadius: '12px',
+                border: '1px solid #e2e8f0'
+              }}>
+                <p style={{ fontWeight: '600', color: '#1e293b' }}>
+                  {dailyFocus.priority}
+                </p>
+              </div>
+            </div>
+
+            <div style={{
+              background: 'white',
+              borderRadius: '20px',
+              padding: '24px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+              border: '1px solid rgba(0,0,0,0.05)'
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                marginBottom: '16px'
+              }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  borderRadius: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '20px'
+                }}>📧</div>
+                <h3 style={{ fontSize: '20px', fontWeight: '700', color: '#1e293b' }}>
+                  Smart Inbox
+                </h3>
+              </div>
+              <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '16px' }}>
+                {emails.length || 12} unread emails organized by AI
+              </p>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {['Priority (3)', 'Work (5)', 'Personal (4)'].map((category, index) => (
+                  <span key={index} style={{
+                    background: ['#f093fb', '#667eea', '#64748b'][index],
+                    color: 'white',
+                    padding: '4px 12px',
+                    borderRadius: '12px',
+                    fontSize: '12px',
+                    fontWeight: '600'
+                  }}>
+                    {category}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div style={{
+              background: 'white',
+              borderRadius: '20px',
+              padding: '24px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+              border: '1px solid rgba(0,0,0,0.05)'
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                marginBottom: '16px'
+              }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  borderRadius: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '20px'
+                }}>🤖</div>
+                <h3 style={{ fontSize: '20px', fontWeight: '700', color: '#1e293b' }}>
+                  AI Assistant
+                </h3>
+              </div>
+
+              <div style={{
+                maxHeight: '200px',
+                overflowY: 'auto',
+                marginBottom: '16px'
+              }}>
+                {assistantMessages.slice(-2).map((msg, index) => (
+                  <div key={index} style={{
+                    display: 'flex',
+                    marginBottom: '12px',
+                    alignItems: 'flex-start',
+                    gap: '8px'
+                  }}>
+                    <div style={{
+                      width: '24px',
+                      height: '24px',
+                      borderRadius: '12px',
+                      background: msg.role === 'assistant' 
+                        ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' 
+                        : 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'white',
+                      fontSize: '10px',
+                      flexShrink: 0
+                    }}>
+                      {msg.role === 'assistant' ? '🤖' : '👤'}
+                    </div>
+                    <div style={{
+                      flex: 1,
+                      background: msg.role === 'assistant' ? '#f8fafc' : '#f0f9ff',
+                      padding: '8px 12px',
+                      borderRadius: '8px',
+                      border: msg.role === 'assistant' 
+                        ? '1px solid #e2e8f0' 
+                        : '1px solid #0ea5e9',
+                      fontSize: '12px',
+                      lineHeight: '1.4',
+                      color: '#1e293b'
+                    }}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={assistantInput}
+                  onChange={(e) => setAssistantInput(e.target.value)}
+                  placeholder="Ask me anything..."
+                  style={{
+                    flex: 1,
+                    padding: '8px 12px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '16px',
+                    fontSize: '12px',
+                    outline: 'none',
+                    background: '#f8fafc'
+                  }}
+                  onKeyPress={(e) => e.key === 'Enter' && !assistantLoading && assistantInput.trim() && handleAssistantMessage()}
+                />
+                <button
+                  onClick={() => handleAssistantMessage()}
+                  disabled={assistantLoading || !assistantInput.trim()}
+                  style={{
+                    padding: '8px 12px',
+                    background: assistantLoading || !assistantInput.trim() 
+                      ? '#94a3b8' 
+                      : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '16px',
+                    cursor: assistantLoading || !assistantInput.trim() ? 'not-allowed' : 'pointer',
+                    fontSize: '12px',
+                    fontWeight: '600'
+                  }}
+                >
+                  ➤
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="vaai-app-container">
+      {renderLarkSidebar()}
+      
+      <div className="vaai-main-content" style={{
+        marginLeft: sidebarVisible ? '280px' : '0',
+        transition: 'margin-left 0.3s ease',
+        minHeight: '100vh',
+        background: '#f8fafc'
+      }}>
+        <header className="workspace-hero" style={{
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          color: 'white',
+          padding: '20px 32px',
+          minHeight: '80px',
+          display: 'flex',
+          alignItems: 'center'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            width: '100%'
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '16px'
+            }}>
+              {!sidebarVisible && (
+                <button 
+                  onClick={() => setSidebarVisible(true)}
+                  title="Show sidebar"
+                  style={{
+                    background: 'rgba(255,255,255,0.2)',
+                    border: 'none',
+                    color: 'white',
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '18px'
+                  }}
+                >
+                  ☰
+                </button>
+              )}
+              <span style={{ fontSize: '24px' }}>🔍</span>
+              <span style={{ 
+                fontSize: '24px', 
+                fontWeight: '600',
+                letterSpacing: '0.5px'
+              }}>VAAI Command</span>
+            </div>
+            <div style={{
+              fontSize: '14px',
+              opacity: 0.9
+            }}>
+              {user?.email}
+            </div>
+          </div>
+        </header>
+
+        <main style={{
+          padding: '32px',
+          maxWidth: '1400px',
+          margin: '0 auto'
+        }}>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: '32px'
+          }}>
+            <div>
+              <h1 style={{
+                fontSize: '36px',
+                fontWeight: '800',
+                color: '#1e293b',
+                marginBottom: '8px',
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                backgroundClip: 'text'
+              }}>AI Command Center</h1>
+              <p style={{
+                fontSize: '16px',
+                color: '#64748b',
+                fontWeight: '500'
+              }}>
+                {new Date().toLocaleDateString('en-US', { 
+                  weekday: 'long', 
+                  year: 'numeric', 
+                  month: 'long', 
+                  day: 'numeric' 
+                })}
+              </p>
+            </div>
+          </div>
+
+          {renderMainContent()}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+  const [followUps, setFollowUps] = useState([]);
+  const [followUpLoading, setFollowUpLoading] = useState(false);
+  const [followUpError, setFollowUpError] = useState(null);
+  const [followUpModal, setFollowUpModal] = useState(null);
+  const [followUpActionId, setFollowUpActionId] = useState(null);
+  const [meetingBriefs, setMeetingBriefs] = useState([]);
+  const [meetingBriefLoading, setMeetingBriefLoading] = useState(false);
+  const [meetingBriefError, setMeetingBriefError] = useState(null);
+  const [meetingBriefModal, setMeetingBriefModal] = useState(null);
+  const [meetingEventDetails, setMeetingEventDetails] = useState(null);
+  const [meetingEditMode, setMeetingEditMode] = useState(false);
+  const [meetingEditSaving, setMeetingEditSaving] = useState(false);
+  const [meetingEditForm, setMeetingEditForm] = useState({
+    summary: '',
+    start: '',
+    end: '',
+    location: '',
+    description: '',
+    attendees: ''
+  });
+  const [meetingScope, setMeetingScope] = useState('team');
+  const [meetingRangeDays, setMeetingRangeDays] = useState(7);
+  const [tasks, setTasks] = useState([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [tasksError, setTasksError] = useState(null);
+  const [taskShowCompleted, setTaskShowCompleted] = useState(false);
+  const [taskSubmitting, setTaskSubmitting] = useState(false);
+  const [taskForm, setTaskForm] = useState({
+    title: '',
+    notes: '',
+    due: ''
+  });
+  const [gmailForm, setGmailForm] = useState({
+    to: '',
+    subject: '',
+    textBody: ''
+  });
+  
+  // Configuration from environment variables
+  const defaultDocDestinationFolder = import.meta.env.VITE_DEFAULT_DOCS_FOLDER_ID || '';
+  const defaultDocTemplateFolder = import.meta.env.VITE_DEFAULT_DOC_TEMPLATE_FOLDER_ID || '';
+  const defaultSheetsFolder = import.meta.env.VITE_DEFAULT_SHEETS_FOLDER_ID || '';
+  
+  // Document and spreadsheet state
+  const [docsForm, setDocsForm] = useState({
+    title: '',
+    contentFormat: (import.meta.env.VITE_DEFAULT_DOC_CONTENT_FORMAT || 'markdown'),
+    useTemplate: false,
+    templateId: '',
+    content: '',
+    destinationFolderId: defaultDocDestinationFolder
+  });
+  const [sheetsForm, setSheetsForm] = useState({
+    title: '',
+    sheetName: '',
+    range: 'A1',
+    valuesText: '',
+    valueInputOption: 'USER_ENTERED'
+  });
+  
+  // Assistant state
+  const [assistantMessages, setAssistantMessages] = useState([
+    {
+      role: 'assistant',
+      content: 'Hello! I\'m your VAAI assistant. I can help you with email management, scheduling, document creation, and more. What would you like to do today?'
+    }
+  ]);
+  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [assistantError, setAssistantError] = useState(null);
+  
+  // Sidebar state for Lark-inspired UI
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+  
+  useEffect(() => {
+    if (CONFIGURED_API_BASE_URL) {
+      axios.defaults.baseURL = CONFIGURED_API_BASE_URL;
+    }
+  }, [CONFIGURED_API_BASE_URL]);
+
+  const baseApiUrl = CONFIGURED_API_BASE_URL || axios.defaults.baseURL || '';
+  const workerBriefingsEnabled = import.meta.env.VITE_ENABLE_WORKER_BRIEFINGS === 'true';
+
+  // Authentication and API utilities
+  const getAuthHeaders = useCallback(() => {
+    const headers = {
+      Authorization: `Bearer ${token}`
+    };
+    if (activeTeamId) {
+      headers['X-Team-ID'] = activeTeamId;
+    }
+    return headers;
+  }, [token, activeTeamId]);
+
+  // Toast notification system
+  const toastTimeoutRef = useRef(null);
+  const showToast = useCallback((toast) => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setActionToast(toast);
+    if (!toast.persistent) {
+      toastTimeoutRef.current = setTimeout(() => {
+        setActionToast(null);
+      }, 5000);
+    }
+  }, []);
+
+  const dismissToast = useCallback(() => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+    setActionToast(null);
+  }, []);
+
+  // User authentication
+  useEffect(() => {
+    if (token) {
+      axios.get('/auth/me', { headers: getAuthHeaders() })
+        .then(response => {
+          setUser(response.data.user);
+        })
+        .catch(error => {
+          console.error('Failed to get user info:', error);
+          if (error.response?.status === 401) {
+            localStorage.removeItem('vaai_token');
+            setToken(null);
+            setUser(null);
+          }
+        });
+    }
+  }, [token, getAuthHeaders]);
+
+  // Premium Sidebar Component
+  const renderLarkSidebar = () => {
+    console.log('🔍 Sidebar render called, sidebarVisible:', sidebarVisible);
+    return sidebarVisible && (
+      <div style={{
+        width: '280px',
+        background: 'linear-gradient(180deg, #1e293b 0%, #334155 100%)',
+        backdropFilter: 'blur(20px)',
+        borderRight: '1px solid rgba(255,255,255,0.1)',
+        display: 'flex',
+        flexDirection: 'column',
+        position: 'fixed',
+        left: 0,
+        top: 0,
+        height: '100vh',
+        zIndex: 1000,
+        boxShadow: '4px 0 20px rgba(0,0,0,0.15)'
+      }}>
+        {/* Premium Header */}
+        <div style={{
+          padding: '24px 20px',
+          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px'
+          }}>
+            <div style={{
+              width: '36px',
+              height: '36px',
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              borderRadius: '10px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '18px'
+            }}>🔍</div>
+            <div>
+              <div style={{
+                color: 'white',
+                fontSize: '18px',
+                fontWeight: '700',
+                letterSpacing: '0.5px'
+              }}>VAAI</div>
+              <div style={{
+                color: 'rgba(255,255,255,0.6)',
+                fontSize: '12px',
+                fontWeight: '500'
+              }}>Command Center</div>
+            </div>
+          </div>
+          <button 
+            onClick={() => setSidebarVisible(false)}
+            style={{
+              background: 'rgba(255,255,255,0.1)',
+              border: '1px solid rgba(255,255,255,0.2)',
+              color: 'rgba(255,255,255,0.7)',
+              width: '28px',
+              height: '28px',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '14px',
+              transition: 'all 0.2s ease'
+            }}
+            title="Close sidebar"
+          >
+            ✕
+          </button>
+        </div>
+        
+        {/* Navigation */}
+        <nav style={{
+          flex: 1,
+          padding: '20px 0',
+          overflowY: 'auto'
+        }}>
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{
+              color: 'rgba(255,255,255,0.5)',
+              fontSize: '11px',
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              padding: '0 20px',
+              marginBottom: '12px'
+            }}>Workspace</div>
+            
+            <div style={{
+              background: 'linear-gradient(90deg, rgba(102, 126, 234, 0.3) 0%, transparent 100%)',
+              borderRight: '3px solid #667eea',
+              margin: '0 0 8px 0',
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'white',
+              fontSize: '14px',
+              fontWeight: '500'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                background: 'rgba(102, 126, 234, 0.3)',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>📊</span>
+              Dashboard
+              <span style={{
+                marginLeft: 'auto',
+                background: '#667eea',
+                color: 'white',
+                fontSize: '10px',
+                padding: '2px 6px',
+                borderRadius: '10px',
+                fontWeight: '600'
+              }}>Live</span>
+            </div>
+            
+            <div style={{
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: '14px',
+              fontWeight: '500',
+              transition: 'all 0.2s ease'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>🤖</span>
+              AI Assistant
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{
+              color: 'rgba(255,255,255,0.5)',
+              fontSize: '11px',
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              padding: '0 20px',
+              marginBottom: '12px'
+            }}>Productivity</div>
+            
+            <div style={{
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: '14px',
+              fontWeight: '500',
+              transition: 'all 0.2s ease'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>📧</span>
+              Smart Inbox
+              <span style={{
+                marginLeft: 'auto',
+                background: 'rgba(239, 68, 68, 0.9)',
+                color: 'white',
+                fontSize: '10px',
+                padding: '2px 6px',
+                borderRadius: '10px',
+                fontWeight: '600'
+              }}>{emails.length}</span>
+            </div>
+            
+            <div style={{
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: '14px',
+              fontWeight: '500',
+              transition: 'all 0.2s ease'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>📅</span>
+              Calendar AI
+              <span style={{
+                marginLeft: 'auto',
+                background: 'rgba(34, 197, 94, 0.9)',
+                color: 'white',
+                fontSize: '10px',
+                padding: '2px 6px',
+                borderRadius: '10px',
+                fontWeight: '600'
+              }}>{calendarEvents.length}</span>
+            </div>
+            
+            <div style={{
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: '14px',
+              fontWeight: '500',
+              transition: 'all 0.2s ease'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>✅</span>
+              Task Intelligence
+              <span style={{
+                marginLeft: 'auto',
+                background: 'rgba(168, 85, 247, 0.9)',
+                color: 'white',
+                fontSize: '10px',
+                padding: '2px 6px',
+                borderRadius: '10px',
+                fontWeight: '600'
+              }}>{tasks.filter(t => !t.completed).length}</span>
+            </div>
+          </div>
+
+          <div>
+            <div style={{
+              color: 'rgba(255,255,255,0.5)',
+              fontSize: '11px',
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              padding: '0 20px',
+              marginBottom: '12px'
+            }}>Automation</div>
+            
+            <div style={{
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: '14px',
+              fontWeight: '500',
+              transition: 'all 0.2s ease'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>⚡</span>
+              Workflows
+            </div>
+            
+            <div style={{
+              padding: '12px 20px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              color: 'rgba(255,255,255,0.7)',
+              fontSize: '14px',
+              fontWeight: '500',
+              transition: 'all 0.2s ease'
+            }}>
+              <span style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px'
+              }}>👥</span>
+              Team Hub
+            </div>
+          </div>
+        </nav>
+        
+        {/* Premium Footer */}
+        <div style={{
+          padding: '20px',
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          background: 'rgba(0,0,0,0.2)'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px'
+          }}>
+            <div style={{
+              width: '40px',
+              height: '40px',
+              background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+              borderRadius: '20px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'white',
+              fontSize: '16px',
+              fontWeight: '600'
+            }}>
+              {user?.email?.charAt(0).toUpperCase() || 'D'}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: '600',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}>
+                {user?.name || 'Darren Nash'}
+              </div>
+              <div style={{
+                color: 'rgba(255,255,255,0.6)',
+                fontSize: '12px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}>
+                {user?.email || 'dnash29@gmail.com'}
+              </div>
+            </div>
+            <div style={{
+              width: '8px',
+              height: '8px',
+              background: '#10b981',
+              borderRadius: '4px',
+              border: '2px solid rgba(255,255,255,0.3)'
+            }}></div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const handleGoogleLogin = async () => {
+    const clientId = '861657987071-nm3714c8pqas96kquicgu9e77etj4c6f.apps.googleusercontent.com';
+    const redirectUri = encodeURIComponent(window.location.origin + '/auth/callback');
+    const scope = encodeURIComponent('openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets');
+    
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&access_type=offline&prompt=consent`;
+    
+    window.location.href = authUrl;
+  };
+
+  // OAuth callback handling
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    if (code) {
+      handleOAuthCallback(code);
+    }
+  }, []);
+
+  const handleOAuthCallback = async (code) => {
+    try {
+      const response = await axios.post('/auth/google/callback', { code });
+      const { token: newToken, user: userData } = response.data;
+      
+      localStorage.setItem('vaai_token', newToken);
+      setToken(newToken);
+      setUser(userData);
+      
+      // Clear the code from URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } catch (error) {
+      console.error('OAuth callback failed:', error);
+      showToast({ 
+        message: 'Authentication failed. Please try again.', 
+        error: true 
+      });
+    }
+  };
+
+  // Assistant message handling
+  const handleAssistantMessage = async () => {
+    if (!assistantInput.trim() || assistantLoading) return;
+    
+    const userMessage = assistantInput.trim();
+    setAssistantInput('');
+    setAssistantLoading(true);
+    
+    // Add user message immediately
+    setAssistantMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    
+    try {
+      const response = await axios.post('/api/assistant', {
+        message: userMessage,
+        context: {
+          emails: emails.slice(0, 5), // Send recent emails for context
+          user: user
+        }
+      }, { headers: getAuthHeaders() });
+      
+      setAssistantMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: response.data.response 
+      }]);
+    } catch (error) {
+      console.error('Assistant error:', error);
+      setAssistantMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: 'Sorry, I encountered an error. Please try again later.' 
+      }]);
+    } finally {
+      setAssistantLoading(false);
+    }
+  };
+
+  // Daily briefing generation
+  const generateDailyBriefing = async () => {
+    setBriefingLoading(true);
+    setBriefingError(null);
+    
+    try {
+      const response = await axios.post('/api/briefing/generate', {
+        includeEmails: true,
+        includeCalendar: true,
+        includeTasks: true
+      }, { headers: getAuthHeaders() });
+      
+      setBriefing(response.data.briefing);
+    } catch (error) {
+      console.error('Failed to generate briefing:', error);
+      setBriefingError('Failed to generate daily briefing');
+      showToast({ 
+        message: 'Could not generate daily briefing. Please try again.', 
+        error: true 
+      });
+    } finally {
+      setBriefingLoading(false);
+    }
+  };
+
+  // Load data on mount
+  useEffect(() => {
+    if (user && token) {
+      // Auto-generate daily briefing
+      generateDailyBriefing();
+      
+      // Load initial data
+      loadEmails();
+      loadCalendarEvents();
+      loadTasks();
+    }
+  }, [user, token]);
+
+  const loadEmails = async () => {
+    try {
+      const response = await axios.get('/api/gmail/messages', { 
+        headers: getAuthHeaders(),
+        params: { maxResults: 10 }
+      });
+      setEmails(response.data.messages || []);
+    } catch (error) {
+      console.error('Failed to load emails:', error);
+    }
+  };
+
+  const loadCalendarEvents = async () => {
+    try {
+      const response = await axios.get('/api/calendar/events', { 
+        headers: getAuthHeaders(),
+        params: { 
+          timeMin: new Date().toISOString(),
+          timeMax: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        }
+      });
+      setCalendarEvents(response.data.events || []);
+    } catch (error) {
+      console.error('Failed to load calendar events:', error);
+    }
+  };
+
+  const loadTasks = async () => {
+    try {
+      const response = await axios.get('/api/tasks', { 
+        headers: getAuthHeaders()
+      });
+      setTasks(response.data.tasks || []);
+    } catch (error) {
+      console.error('Failed to load tasks:', error);
+    }
+  };
+  
+  if (!user) {
+    return (
+      <div className="vaai-app-container">
+        {renderLarkSidebar()}
+        <div className="login-container" style={{
+          marginLeft: sidebarVisible ? '280px' : '0',
+          transition: 'margin-left 0.3s ease',
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+        }}>
+          <div className="login-card" style={{
+            background: 'white',
+            padding: '40px',
+            borderRadius: '16px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.1)',
+            textAlign: 'center',
+            maxWidth: '400px',
+            width: '90%'
+          }}>
+            <h1 style={{
+              fontSize: '32px',
+              fontWeight: '700',
+              color: '#1e293b',
+              marginBottom: '8px'
+            }}>VAAI</h1>
+            <p className="login-tagline" style={{
+              color: '#64748b',
+              fontSize: '16px',
+              marginBottom: '32px'
+            }}>Virtual Assistant AI for Email Management</p>
+            <button onClick={handleGoogleLogin} className="google-login-btn" style={{
+              background: '#4285f4',
+              color: 'white',
+              border: 'none',
+              padding: '12px 24px',
+              borderRadius: '8px',
+              fontSize: '16px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              width: '100%',
+              marginBottom: '16px'
+            }}>
+              Sign in with Google
+            </button>
+            <p className="login-subtext" style={{
+              fontSize: '14px',
+              color: '#64748b'
+            }}>
+              Start on the Solo plan — upgrade to Business once your team is ready.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="vaai-app-container">
+      {renderLarkSidebar()}
+      
+      <div className="vaai-main-content" style={{
+        marginLeft: sidebarVisible ? '280px' : '0',
+        transition: 'margin-left 0.3s ease',
+        minHeight: '100vh',
+        background: '#f8fafc'
+      }}>
+        <header className="workspace-hero" style={{
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          color: 'white',
+          padding: '20px 32px',
+          minHeight: '80px',
+          display: 'flex',
+          alignItems: 'center'
+        }}>
+          <div className="workspace-nav" style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            width: '100%'
+          }}>
+            <div className="workspace-brand" style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '16px'
+            }}>
+              {!sidebarVisible && (
+                <button 
+                  className="vaai-sidebar-toggle"
+                  onClick={() => setSidebarVisible(true)}
+                  title="Show sidebar"
+                  style={{
+                    background: 'rgba(255,255,255,0.2)',
+                    border: 'none',
+                    color: 'white',
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '18px'
+                  }}
+                >
+                  ☰
+                </button>
+              )}
+              <span className="workspace-brand-icon" style={{ fontSize: '24px' }}>🔍</span>
+              <span className="workspace-brand-name" style={{ 
+                fontSize: '24px', 
+                fontWeight: '600',
+                letterSpacing: '0.5px'
+              }}>VAAI Command</span>
+            </div>
+          </div>
+        </header>
+
+        <main className="workspace-main" style={{
+          padding: '32px',
+          maxWidth: '1400px',
+          margin: '0 auto'
+        }}>
+          <div className="workspace-content">
+            {/* Premium Header */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '32px'
+            }}>
+              <div>
+                <h1 style={{
+                  fontSize: '36px',
+                  fontWeight: '800',
+                  color: '#1e293b',
+                  marginBottom: '8px',
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text'
+                }}>AI Command Center</h1>
+                <p style={{
+                  fontSize: '16px',
+                  color: '#64748b',
+                  fontWeight: '500'
+                }}>
+                  {new Date().toLocaleDateString('en-US', { 
+                    weekday: 'long', 
+                    year: 'numeric', 
+                    month: 'long', 
+                    day: 'numeric' 
+                  })}
+                </p>
+              </div>
+              <div style={{
+                display: 'flex',
+                gap: '12px'
+              }}>
+                <button
+                  onClick={generateDailyBriefing}
+                  disabled={briefingLoading}
+                  style={{
+                    background: briefingLoading 
+                      ? '#94a3b8' 
+                      : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                    color: 'white',
+                    border: 'none',
+                    padding: '12px 20px',
+                    borderRadius: '10px',
+                    cursor: briefingLoading ? 'not-allowed' : 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    boxShadow: '0 4px 12px rgba(102, 126, 234, 0.3)'
+                  }}
+                >
+                  {briefingLoading ? '⏳ Analyzing...' : '🎯 Generate Daily Focus'}
+                </button>
+              </div>
+            </div>
+            
+            {/* Daily Focus Dashboard */}
+            {briefing && (
+              <div style={{
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                borderRadius: '20px',
+                padding: '32px',
+                marginBottom: '32px',
+                color: 'white',
+                position: 'relative',
+                overflow: 'hidden',
+                boxShadow: '0 10px 40px rgba(102, 126, 234, 0.3)'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-50px',
+                  right: '-50px',
+                  width: '200px',
+                  height: '200px',
+                  background: 'rgba(255,255,255,0.1)',
+                  borderRadius: '50%'
+                }}></div>
+                
+                <h2 style={{
+                  fontSize: '32px',
+                  fontWeight: '800',
+                  marginBottom: '8px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  ☀️ Daily Focus
+                </h2>
+                <p style={{
+                  fontSize: '16px',
+                  opacity: 0.9,
+                  marginBottom: '24px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  {briefing.summary || "AI is analyzing your priorities for today..."}
+                </p>
+                
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                  gap: '20px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  <div style={{
+                    background: 'rgba(255,255,255,0.15)',
+                    borderRadius: '16px',
+                    padding: '20px',
+                    backdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(255,255,255,0.2)'
+                  }}>
+                    <div style={{ fontSize: '32px', fontWeight: '800', marginBottom: '8px' }}>
+                      {emails.length || 0}
+                    </div>
+                    <div style={{ fontSize: '14px', opacity: 0.9 }}>Smart Emails</div>
+                  </div>
+                  
+                  <div style={{
+                    background: 'rgba(255,255,255,0.15)',
+                    borderRadius: '16px',
+                    padding: '20px',
+                    backdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(255,255,255,0.2)'
+                  }}>
+                    <div style={{ fontSize: '32px', fontWeight: '800', marginBottom: '8px' }}>
+                      {calendarEvents.length || 0}
+                    </div>
+                    <div style={{ fontSize: '14px', opacity: 0.9 }}>AI Meetings</div>
+                  </div>
+                  
+                  <div style={{
+                    background: 'rgba(255,255,255,0.15)',
+                    borderRadius: '16px',
+                    padding: '20px',
+                    backdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(255,255,255,0.2)'
+                  }}>
+                    <div style={{ fontSize: '32px', fontWeight: '800', marginBottom: '8px' }}>
+                      {tasks.filter(t => !t.completed).length || 0}
+                    </div>
+                    <div style={{ fontSize: '14px', opacity: 0.9 }}>Auto Tasks</div>
+                  </div>
+                  
+                  <div style={{
+                    background: 'rgba(255,255,255,0.15)',
+                    borderRadius: '16px',
+                    padding: '20px',
+                    backdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(255,255,255,0.2)'
+                  }}>
+                    <div style={{ fontSize: '32px', fontWeight: '800', marginBottom: '8px' }}>
+                      94%
+                    </div>
+                    <div style={{ fontSize: '14px', opacity: 0.9 }}>Productivity</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Main AI Workspace */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 400px',
+              gap: '32px',
+              marginBottom: '32px'
+            }}>
+              {/* Email Intelligence */}
+              <div style={{
+                background: 'white',
+                borderRadius: '20px',
+                padding: '32px',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+                border: '1px solid rgba(0,0,0,0.05)'
+              }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: '24px'
+                }}>
+                  <h3 style={{
+                    fontSize: '24px',
+                    fontWeight: '700',
+                    color: '#1e293b',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px'
+                  }}>
+                    <div style={{
+                      width: '40px',
+                      height: '40px',
+                      background: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%)',
+                      borderRadius: '12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '20px'
+                    }}>📧</div>
+                    Smart Inbox
+                  </h3>
+                  <button style={{
+                    background: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%)',
+                    color: 'white',
+                    border: 'none',
+                    padding: '8px 16px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    cursor: 'pointer'
+                  }}>
+                    Auto-Sort
+                  </button>
+                </div>
+
+                <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                  {emails.length > 0 ? emails.map((email, index) => (
+                    <div key={index} style={{
+                      padding: '16px',
+                      borderRadius: '12px',
+                      background: '#f8fafc',
+                      marginBottom: '12px',
+                      border: '1px solid #e2e8f0'
+                    }}>
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '8px'
+                      }}>
+                        <div style={{
+                          fontSize: '14px',
+                          fontWeight: '600',
+                          color: '#1e293b'
+                        }}>
+                          {email.sender || 'AI Email'}
+                        </div>
+                        <span style={{
+                          background: '#10b981',
+                          color: 'white',
+                          fontSize: '10px',
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          fontWeight: '600'
+                        }}>
+                          AI Priority
+                        </span>
+                      </div>
+                      <div style={{
+                        fontSize: '13px',
+                        color: '#64748b',
+                        lineHeight: '1.4'
+                      }}>
+                        {email.subject || `AI-categorized email ${index + 1}`}
+                      </div>
+                    </div>
+                  )) : (
+                    <div style={{
+                      textAlign: 'center',
+                      padding: '40px',
+                      color: '#64748b'
+                    }}>
+                      <div style={{ fontSize: '48px', marginBottom: '16px' }}>📧</div>
+                      <div style={{ fontSize: '16px', fontWeight: '500' }}>
+                        AI Email Intelligence Ready
+                      </div>
+                      <div style={{ fontSize: '14px', marginTop: '8px' }}>
+                        Connect Gmail to enable smart sorting
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+            {/* Premium AI Assistant Section */}
+            <div className="assistant-section" style={{
+              background: 'white',
+              borderRadius: '16px',
+              padding: '32px',
+              boxShadow: '0 10px 30px rgba(0,0,0,0.1)',
+              marginBottom: '32px',
+              border: '1px solid rgba(102, 126, 234, 0.1)'
+            }}>
+              <h3 style={{
+                fontSize: '24px',
+                fontWeight: '700',
+                color: '#1e293b',
+                marginBottom: '8px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px'
+              }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '20px'
+                }}>🤖</div>
+                AI Assistant
+              </h3>
+              <p style={{ 
+                color: '#64748b', 
+                marginBottom: '24px',
+                fontSize: '16px'
+              }}>
+                Your intelligent productivity partner
+              </p>
+              
+              <div className="assistant-messages" style={{
+                maxHeight: '400px',
+                overflowY: 'auto',
+                marginBottom: '20px',
+                padding: '0'
+              }}>
+                {assistantMessages.map((msg, index) => (
+                  <div key={index} style={{
+                    display: 'flex',
+                    marginBottom: '20px',
+                    alignItems: 'flex-start',
+                    gap: '12px'
+                  }}>
+                    <div style={{
+                      width: '36px',
+                      height: '36px',
+                      borderRadius: '18px',
+                      background: msg.role === 'assistant' 
+                        ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' 
+                        : 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'white',
+                      fontSize: '14px',
+                      fontWeight: '600',
+                      flexShrink: 0
+                    }}>
+                      {msg.role === 'assistant' ? '🤖' : '👤'}
+                    </div>
+                    <div style={{
+                      flex: 1,
+                      background: msg.role === 'assistant' ? '#f8fafc' : '#f0f9ff',
+                      padding: '16px 20px',
+                      borderRadius: '16px',
+                      border: msg.role === 'assistant' 
+                        ? '1px solid #e2e8f0' 
+                        : '1px solid #0ea5e9',
+                      fontSize: '15px',
+                      lineHeight: '1.6',
+                      color: '#1e293b'
+                    }}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))}
+                {assistantLoading && (
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    marginBottom: '20px'
+                  }}>
+                    <div style={{
+                      width: '36px',
+                      height: '36px',
+                      borderRadius: '18px',
+                      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'white'
+                    }}>🤖</div>
+                    <div style={{
+                      background: '#f8fafc',
+                      padding: '16px 20px',
+                      borderRadius: '16px',
+                      border: '1px solid #e2e8f0',
+                      fontSize: '15px',
+                      color: '#64748b'
+                    }}>
+                      ✨ Thinking...
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              <div style={{ 
+                display: 'flex', 
+                gap: '12px',
+                background: '#f8fafc',
+                padding: '16px',
+                borderRadius: '12px',
+                border: '1px solid #e2e8f0'
+              }}>
+                <input
+                  type="text"
+                  value={assistantInput}
+                  onChange={(e) => setAssistantInput(e.target.value)}
+                  placeholder="Ask me anything about your emails, calendar, or tasks..."
+                  style={{
+                    flex: 1,
+                    padding: '14px 20px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '25px',
+                    fontSize: '15px',
+                    outline: 'none',
+                    background: 'white'
+                  }}
+                  onKeyPress={(e) => e.key === 'Enter' && !assistantLoading && assistantInput.trim() && handleAssistantMessage()}
+                />
+                <button
+                  onClick={() => handleAssistantMessage()}
+                  disabled={assistantLoading || !assistantInput.trim()}
+                  style={{
+                    padding: '14px 24px',
+                    background: assistantLoading || !assistantInput.trim() 
+                      ? '#94a3b8' 
+                      : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '25px',
+                    cursor: assistantLoading || !assistantInput.trim() ? 'not-allowed' : 'pointer',
+                    fontSize: '15px',
+                    fontWeight: '600',
+                    transition: 'all 0.2s ease',
+                    minWidth: '80px'
+                  }}
+                >
+                  {assistantLoading ? '⏳' : '➤'}
+                </button>
+              </div>
+            </div>
+
+            {/* Premium Feature Cards */}
+            <div className="feature-showcase" style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+              gap: '24px',
+              marginBottom: '32px'
+            }}>
+              <div style={{
+                background: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%)',
+                borderRadius: '20px',
+                padding: '32px',
+                color: 'white',
+                position: 'relative',
+                overflow: 'hidden',
+                cursor: 'pointer',
+                transition: 'transform 0.2s ease',
+                ':hover': { transform: 'translateY(-2px)' }
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-20px',
+                  right: '-20px',
+                  width: '80px',
+                  height: '80px',
+                  background: 'rgba(255,255,255,0.1)',
+                  borderRadius: '50%'
+                }}></div>
+                <div style={{
+                  fontSize: '40px',
+                  marginBottom: '16px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>📧</div>
+                <h4 style={{
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  marginBottom: '12px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  Smart Email Management
+                </h4>
+                <p style={{
+                  fontSize: '15px',
+                  opacity: 0.9,
+                  lineHeight: '1.5',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  AI automatically categorizes, prioritizes, and drafts responses to your emails
+                </p>
+                <div style={{
+                  marginTop: '16px',
+                  background: 'rgba(255,255,255,0.2)',
+                  padding: '8px 16px',
+                  borderRadius: '20px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  display: 'inline-block'
+                }}>
+                  {emails.length} emails processed
+                </div>
+              </div>
+              
+              <div style={{
+                background: 'linear-gradient(135deg, #4ecdc4 0%, #44a08d 100%)',
+                borderRadius: '20px',
+                padding: '32px',
+                color: 'white',
+                position: 'relative',
+                overflow: 'hidden',
+                cursor: 'pointer',
+                transition: 'transform 0.2s ease'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-20px',
+                  right: '-20px',
+                  width: '80px',
+                  height: '80px',
+                  background: 'rgba(255,255,255,0.1)',
+                  borderRadius: '50%'
+                }}></div>
+                <div style={{
+                  fontSize: '40px',
+                  marginBottom: '16px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>📅</div>
+                <h4 style={{
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  marginBottom: '12px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  Intelligent Scheduling
+                </h4>
+                <p style={{
+                  fontSize: '15px',
+                  opacity: 0.9,
+                  lineHeight: '1.5',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  AI finds optimal meeting times and prepares briefings automatically
+                </p>
+                <div style={{
+                  marginTop: '16px',
+                  background: 'rgba(255,255,255,0.2)',
+                  padding: '8px 16px',
+                  borderRadius: '20px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  display: 'inline-block'
+                }}>
+                  {calendarEvents.length} meetings today
+                </div>
+              </div>
+              
+              <div style={{
+                background: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)',
+                borderRadius: '20px',
+                padding: '32px',
+                color: '#2d3748',
+                position: 'relative',
+                overflow: 'hidden',
+                cursor: 'pointer',
+                transition: 'transform 0.2s ease'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-20px',
+                  right: '-20px',
+                  width: '80px',
+                  height: '80px',
+                  background: 'rgba(255,255,255,0.3)',
+                  borderRadius: '50%'
+                }}></div>
+                <div style={{
+                  fontSize: '40px',
+                  marginBottom: '16px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>✅</div>
+                <h4 style={{
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  marginBottom: '12px',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  Proactive Task Management
+                </h4>
+                <p style={{
+                  fontSize: '15px',
+                  opacity: 0.8,
+                  lineHeight: '1.5',
+                  position: 'relative',
+                  zIndex: 1
+                }}>
+                  Automatically extracts and tracks tasks from emails and meetings
+                </p>
+                <div style={{
+                  marginTop: '16px',
+                  background: 'rgba(45, 55, 72, 0.1)',
+                  padding: '8px 16px',
+                  borderRadius: '20px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  display: 'inline-block'
+                }}>
+                  {tasks.filter(t => !t.completed).length} active tasks
+                </div>
+              </div>
+
+              {/* AI Assistant Panel */}
+              <div style={{
+                background: 'white',
+                borderRadius: '20px',
+                padding: '32px',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.08)',
+                border: '1px solid rgba(0,0,0,0.05)'
+              }}>
+                <h3 style={{
+                  fontSize: '24px',
+                  fontWeight: '700',
+                  color: '#1e293b',
+                  marginBottom: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px'
+                }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                    borderRadius: '12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '20px'
+                  }}>🤖</div>
+                  AI Assistant
+                </h3>
+                <p style={{ 
+                  color: '#64748b', 
+                  marginBottom: '24px',
+                  fontSize: '14px'
+                }}>
+                  Your intelligent productivity partner
+                </p>
+
+                <div className="assistant-messages" style={{
+                  maxHeight: '250px',
+                  overflowY: 'auto',
+                  marginBottom: '20px',
+                  padding: '0'
+                }}>
+                  {assistantMessages.slice(-3).map((msg, index) => (
+                    <div key={index} style={{
+                      display: 'flex',
+                      marginBottom: '16px',
+                      alignItems: 'flex-start',
+                      gap: '8px'
+                    }}>
+                      <div style={{
+                        width: '28px',
+                        height: '28px',
+                        borderRadius: '14px',
+                        background: msg.role === 'assistant' 
+                          ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' 
+                          : 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'white',
+                        fontSize: '12px',
+                        flexShrink: 0
+                      }}>
+                        {msg.role === 'assistant' ? '🤖' : '👤'}
+                      </div>
+                      <div style={{
+                        flex: 1,
+                        background: msg.role === 'assistant' ? '#f8fafc' : '#f0f9ff',
+                        padding: '12px 16px',
+                        borderRadius: '12px',
+                        border: msg.role === 'assistant' 
+                          ? '1px solid #e2e8f0' 
+                          : '1px solid #0ea5e9',
+                        fontSize: '13px',
+                        lineHeight: '1.4',
+                        color: '#1e293b'
+                      }}>
+                        {msg.content}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                
+                <div style={{ 
+                  display: 'flex', 
+                  gap: '8px'
+                }}>
+                  <input
+                    type="text"
+                    value={assistantInput}
+                    onChange={(e) => setAssistantInput(e.target.value)}
+                    placeholder="Ask me anything..."
+                    style={{
+                      flex: 1,
+                      padding: '12px 16px',
+                      border: '1px solid #d1d5db',
+                      borderRadius: '20px',
+                      fontSize: '14px',
+                      outline: 'none',
+                      background: '#f8fafc'
+                    }}
+                    onKeyPress={(e) => e.key === 'Enter' && !assistantLoading && assistantInput.trim() && handleAssistantMessage()}
+                  />
+                  <button
+                    onClick={() => handleAssistantMessage()}
+                    disabled={assistantLoading || !assistantInput.trim()}
+                    style={{
+                      padding: '12px 16px',
+                      background: assistantLoading || !assistantInput.trim() 
+                        ? '#94a3b8' 
+                        : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '20px',
+                      cursor: assistantLoading || !assistantInput.trim() ? 'not-allowed' : 'pointer',
+                      fontSize: '14px',
+                      fontWeight: '600'
+                    }}
+                  >
+                    ➤
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export default App;

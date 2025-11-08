@@ -1,0 +1,39 @@
+{
+  "name": "vaai-tests",
+  "version": "1.0.0",
+  "description": "Test suite for VAAI application",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:integration": "jest --testMatch='**/*.integration.test.js'",
+    "test:unit": "jest --testMatch='**/*.unit.test.js'",
+    "test:e2e": "cypress open",
+    "test:e2e:headless": "cypress run",
+    "test:smoke": "node smoke-tests/run-smoke-tests.js"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3",
+    "cypress": "^13.6.1",
+    "@jest/globals": "^29.7.0",
+    "jest-environment-node": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "roots": ["<rootDir>/tests"],
+    "testMatch": [
+      "**/__tests__/**/*.js",
+      "**/?(*.)+(spec|test).js"
+    ],
+    "collectCoverageFrom": [
+      "../backend/src/**/*.js",
+      "!../backend/src/index.js",
+      "!**/node_modules/**"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": ["text", "lcov", "html"],
+    "setupFilesAfterEnv": ["<rootDir>/tests/setup.js"],
+    "testTimeout": 30000
+  }
+}

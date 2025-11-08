@@ -551,6 +551,9 @@ app.get('/auth/google', async (c) => {
   authUrl.searchParams.set('prompt', 'consent')
   authUrl.searchParams.set('state', state)
 
+  console.log('DEBUG: GOOGLE_REDIRECT_URI =', c.env.GOOGLE_REDIRECT_URI)
+  console.log('DEBUG: Auth URL =', authUrl.toString())
+
   return c.json({ authUrl: authUrl.toString(), state })
 })
 
@@ -569,6 +572,9 @@ app.get('/auth/google/callback', async (c) => {
   if (state) {
     redirectUrl.searchParams.set('state', state)
   }
+
+  console.log('DEBUG: FRONTEND_REDIRECT_URI =', c.env.FRONTEND_REDIRECT_URI)
+  console.log('DEBUG: Redirecting to =', redirectUrl.toString())
 
   return c.redirect(redirectUrl.toString(), 302)
 })
