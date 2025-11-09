@@ -36,6 +36,7 @@ const { processDueFollowUps } = require('./services/followUpScheduler');
 const { generateMeetingBriefsForTeam } = require('./services/meetingPrepGenerator');
 
 const app = express();
+// Render uses PORT environment variable, default to 3001 for local dev
 const PORT = process.env.PORT || 3001;
 
 // Request ID middleware (before logging)
@@ -116,6 +117,21 @@ app.use(express.urlencoded({
   extended: true,
   limit: '10mb'
 }));
+
+// Root route for Render health checks
+app.get('/', (req, res) => {
+  res.json({
+    name: 'VAAI Backend API',
+    version: '2.7.0',
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/health',
+      auth: '/auth/google',
+      api: '/api/*'
+    }
+  });
+});
 
 // Routes
 app.use('/auth', authRoutes);

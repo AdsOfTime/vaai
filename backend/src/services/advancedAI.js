@@ -467,7 +467,7 @@ Generate a persuasive proposal with clear value proposition and compelling call-
   }
 
   // Bulk email processing method
-  async processBulkEmailActions(emails, actions = {}) {
+  async processBulkEmailActions(emails, actions = {}, tier = 'basic') {
     try {
       if (!emails || !Array.isArray(emails) || emails.length === 0) {
         return {
@@ -478,7 +478,6 @@ Generate a persuasive proposal with clear value proposition and compelling call-
         };
       }
 
-      const tier = await this.subscriptionManager.getUserTier();
       const batchSize = tier === 'enterprise' ? 100 : tier === 'pro' ? 50 : 20;
       const results = [];
 
@@ -501,8 +500,8 @@ Generate a persuasive proposal with clear value proposition and compelling call-
 
               // Prioritize email
               if (actions.prioritize !== false) {
-                const priorityAnalysis = await this.generateSmartEmailPriority([email]);
-                result.priority = priorityAnalysis[0] || this.fallbackEmailAnalysis(email);
+                const priorityAnalysis = await this.generateSmartEmailPriority([email], {}, tier);
+                result.priority = priorityAnalysis[0]?.aiPriority || this.fallbackEmailAnalysis(email);
               }
 
               // Generate auto-response if requested
@@ -522,7 +521,7 @@ Generate a persuasive proposal with clear value proposition and compelling call-
 
               return result;
             } catch (error) {
-              this.logger.error(`Error processing email ${email.id}:`, error);
+              logger.error(`Error processing email ${email.id}:`, error);
               return {
                 id: email.id || `email_${i + index}`,
                 processed: false,
@@ -558,7 +557,7 @@ Generate a persuasive proposal with clear value proposition and compelling call-
         }
       };
     } catch (error) {
-      this.logger.error('Bulk email processing error:', error);
+      logger.error('Bulk email processing error:', error);
       return {
         success: false,
         message: 'Bulk processing failed',
@@ -594,7 +593,7 @@ VAAI Assistant`,
       generated: true
     };
 
-    if (responseConfig.custom && this.openai) {
+    if (responseConfig.custom && this.openaiClient) {
       try {
         const prompt = `Generate an auto-response email for:
 Subject: ${email.subject}
@@ -607,7 +606,7 @@ Response requirements:
 - Set expectations
 - Be helpful and courteous`;
 
-        const completion = await this.openai.chat.completions.create({
+        const completion = await this.openaiClient.chat.completions.create({
           model: 'gpt-3.5-turbo',
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 200,
@@ -620,7 +619,7 @@ Response requirements:
           aiGenerated: true
         };
       } catch (error) {
-        this.logger.error('Auto-response generation error:', error);
+        logger.error('Auto-response generation error:', error);
       }
     }
 

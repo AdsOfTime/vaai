@@ -1,6 +1,6 @@
 {
   "name": "vaai-backend",
-  "version": "1.0.0",
+  "version": "2.7.0",
   "description": "VAAI Backend API",
   "main": "src/index.js",
   "scripts": {

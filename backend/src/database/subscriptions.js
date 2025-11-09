@@ -427,7 +427,32 @@ class SubscriptionManager {
   }
 }
 
+// Export helper functions for routes
+async function getUserSubscription(userId) {
+  const { getDatabase } = require('./init');
+  const db = getDatabase();
+  const manager = new SubscriptionManager(db);
+  return await manager.getUserSubscription(userId);
+}
+
+async function recordUsage(userId, featureName, count = 1, metadata = {}) {
+  const { getDatabase } = require('./init');
+  const db = getDatabase();
+  const manager = new SubscriptionManager(db);
+  return await manager.recordUsage(userId, featureName, count, metadata);
+}
+
+async function getFeatureUsage(userId, featureName, period = 'today') {
+  const { getDatabase } = require('./init');
+  const db = getDatabase();
+  const manager = new SubscriptionManager(db);
+  return await manager.getFeatureUsage(userId, featureName, period);
+}
+
 module.exports = {
   SubscriptionManager,
-  SUBSCRIPTION_TIERS
+  SUBSCRIPTION_TIERS,
+  getUserSubscription,
+  recordUsage,
+  getFeatureUsage
 };

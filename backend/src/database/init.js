@@ -19,7 +19,7 @@ function initDatabase() {
   });
 }
 
-function createTables() {
+async function createTables() {
   return new Promise((resolve, reject) => {
     const queries = [
       `CREATE TABLE IF NOT EXISTS users (
@@ -30,6 +30,45 @@ function createTables() {
         refresh_token TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE TABLE IF NOT EXISTS user_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        tier TEXT NOT NULL DEFAULT 'basic',
+        status TEXT NOT NULL DEFAULT 'active',
+        billing_cycle TEXT NOT NULL DEFAULT 'monthly',
+        current_period_start TEXT NOT NULL,
+        current_period_end TEXT NOT NULL,
+        cancel_at_period_end BOOLEAN DEFAULT FALSE,
+        payment_method_id TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS feature_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        feature_name TEXT NOT NULL,
+        usage_count INTEGER NOT NULL DEFAULT 1,
+        usage_date TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS billing_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        subscription_id INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        currency TEXT DEFAULT 'USD',
+        status TEXT NOT NULL,
+        payment_provider TEXT,
+        provider_payment_id TEXT,
+        billing_period_start TEXT NOT NULL,
+        billing_period_end TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        FOREIGN KEY (subscription_id) REFERENCES user_subscriptions (id)
       )`,
       `CREATE TABLE IF NOT EXISTS email_categories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
