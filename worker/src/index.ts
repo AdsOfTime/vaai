@@ -537,6 +537,7 @@ app.get('/auth/google', async (c) => {
     'https://www.googleapis.com/auth/calendar.events',
     'https://www.googleapis.com/auth/calendar.readonly',
     'https://www.googleapis.com/auth/tasks',
+    'https://www.googleapis.com/auth/drive.readonly',
     'https://www.googleapis.com/auth/drive.file',
     'https://www.googleapis.com/auth/documents',
     'https://www.googleapis.com/auth/spreadsheets'
@@ -550,9 +551,6 @@ app.get('/auth/google', async (c) => {
   authUrl.searchParams.set('access_type', 'offline')
   authUrl.searchParams.set('prompt', 'consent')
   authUrl.searchParams.set('state', state)
-
-  console.log('DEBUG: GOOGLE_REDIRECT_URI =', c.env.GOOGLE_REDIRECT_URI)
-  console.log('DEBUG: Auth URL =', authUrl.toString())
 
   return c.json({ authUrl: authUrl.toString(), state })
 })
