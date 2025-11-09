@@ -26,5 +26,8 @@ export default defineConfig({
   },
   define: {
     'import.meta.env.VITE_API_BASE_URL': JSON.stringify(process.env.VITE_API_BASE_URL || 'https://vaai-backend-worker.dnash29.workers.dev')
+  },
+  preview: {
+    port: 3002
   }
 })

@@ -1,3 +1,2 @@
-/auth/* https://vaai-backend-worker.dnash29.workers.dev/auth/:splat 200
 /api/* https://vaai-backend-worker.dnash29.workers.dev/api/:splat 200
 /* /index.html 200

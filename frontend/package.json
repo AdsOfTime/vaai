@@ -1,6 +1,6 @@
 {
   "name": "vaai-frontend",
-  "version": "1.0.0",
+  "version": "2.7.0",
   "description": "VAAI Frontend Dashboard",
   "scripts": {
     "dev": "vite",
